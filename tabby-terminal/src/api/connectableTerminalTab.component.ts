@@ -119,6 +119,7 @@ export abstract class ConnectableTerminalTabComponent<P extends ConnectableTermi
         this.session?.destroy()
         await this.initializeSession()
         this.clearServiceMessagesOnConnect()
+        this.write('\x1b[?1049l\x1b[?1047l\x1b[?47l')
         this.session?.releaseInitialDataBuffer()
     }
 
