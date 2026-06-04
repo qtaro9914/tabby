@@ -474,12 +474,16 @@ export class XTermFrontend extends Frontend {
     }
 
     resetTerminalModes (): void {
-        // Disable mouse tracking modes (normal, button-event, any-event)
-        // and SGR extended mouse mode to prevent stale mouse tracking
-        // from leaking escape sequences as text after session reconnection
-        this.xterm.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l')
-        // Disable bracketed paste mode
-        this.xterm.write('\x1b[?2004l')
+        this.xterm.write([
+            // Exit alternate screen buffers.
+            '\x1b[?1049l\x1b[?1047l\x1b[?47l',
+            // Re-show the cursor.
+            '\x1b[?25h',
+            // Disable mouse tracking modes.
+            '\x1b[?9;1000;1002;1003;1004;1005;1006;1015;1016l',
+            // Disable bracketed paste mode.
+            '\x1b[?2004l',
+        ].join(''))
     }
 
     visualBell (): void {
