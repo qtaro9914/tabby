@@ -94,7 +94,12 @@ export class AppService {
         }, 30000)
 
         this.recoveryStateChangedHint.pipe(debounceTime(1000)).subscribe(() => {
-            this.tabRecovery.saveTabs(this.tabs)
+            // Serializing every tab's scrollback is expensive — defer it to an
+            // idle period so it doesn't add jank while output is streaming
+            window.requestIdleCallback(
+                () => this.tabRecovery.saveTabs(this.tabs),
+                { timeout: 5000 },
+            )
         })
 
         config.ready$.toPromise().then(async () => {

@@ -78,6 +78,7 @@ export class HotkeysService {
     private suppressNextKeyupKeystroke = false
     private lastEventTimestamp = 0
     private lastWheelTimestamp: number|null = null
+    private cachedHotkeysConfig: Record<string, any>|null = null
 
     private constructor (
         private zone: NgZone,
@@ -111,6 +112,10 @@ export class HotkeysService {
             registerEvent('wheel')
             registerEvent('mouseup', event => 'button' in event && event.button === 1)
             registerEvent('auxclick', event => 'button' in event && event.button === 1)
+        })
+
+        this.config.changed$.subscribe(() => {
+            this.cachedHotkeysConfig = null
         })
 
         // deprecated
@@ -369,7 +374,10 @@ export class HotkeysService {
     }
 
     private getHotkeysConfig () {
-        return this.getHotkeysConfigRecursive(this.config.store.hotkeys)
+        // Rebuilding the flattened hotkey map is too expensive to do on every
+        // key event — cache it until the config changes
+        this.cachedHotkeysConfig ??= this.getHotkeysConfigRecursive(this.config.store.hotkeys)
+        return this.cachedHotkeysConfig
     }
 
     private getHotkeysConfigRecursive (branch: any) {

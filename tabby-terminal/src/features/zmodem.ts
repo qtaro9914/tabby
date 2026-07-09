@@ -23,6 +23,15 @@ class ZModemMiddleware extends SessionMiddleware {
     // overwritten by showMessage()'s leading "\r".
     private trailingBuffer: Buffer[] | null = null
 
+    // Fast-path state: while no session is active, chunks that cannot contain
+    // a ZMODEM header (no ZDLE byte) bypass the sentry entirely. A header
+    // split across the bypass/feed boundary is covered by carrying the last
+    // bytes of the bypassed chunk into the sentry with suppressed re-emission.
+    private bypassTail = Buffer.alloc(0)
+    private wasBypassing = false
+    private feedNextChunk = false
+    private suppressBytes = 0
+
     private flushTrailingBuffer () {
         const buffered = this.trailingBuffer
         this.trailingBuffer = null
@@ -55,10 +64,20 @@ class ZModemMiddleware extends SessionMiddleware {
             // While trailingBuffer is active they are queued so the final
             // status messages can be printed first; otherwise forward directly.
             to_terminal: data => {
+                let buf = Buffer.from(data)
+                if (this.suppressBytes) {
+                    // These bytes were already emitted by the bypass fast path
+                    const skip = Math.min(this.suppressBytes, buf.length)
+                    this.suppressBytes -= skip
+                    if (skip >= buf.length) {
+                        return
+                    }
+                    buf = buf.subarray(skip)
+                }
                 if (this.trailingBuffer) {
-                    this.trailingBuffer.push(Buffer.from(data))
+                    this.trailingBuffer.push(buf)
                 } else {
-                    this.outputToTerminal.next(Buffer.from(data))
+                    this.outputToTerminal.next(buf)
                 }
             },
             sender: data => this.outputToSession.next(Buffer.from(data)),
@@ -115,14 +134,43 @@ class ZModemMiddleware extends SessionMiddleware {
                 return
             }
         } else {
+            // Fast path: every ZMODEM header contains a ZDLE (0x18) byte. If
+            // the chunk has none and the previous chunk did not end near one,
+            // it cannot start or continue a header — skip the sentry (and its
+            // per-byte scan) entirely.
+            const zdleIndex = data.lastIndexOf(0x18)
+            if (zdleIndex === -1 && !this.feedNextChunk) {
+                this.wasBypassing = true
+                this.bypassTail = data.length >= 2
+                    ? data.subarray(data.length - 2)
+                    : Buffer.concat([this.bypassTail, data]).subarray(-2)
+                this.outputToTerminal.next(data)
+                return
+            }
+
+            // A header may span the bypass/feed boundary — prepend the
+            // bypassed tail so the sentry sees the full "**\x18" prefix, and
+            // suppress its re-emission since it has already been shown.
+            let toFeed = data
+            if (this.wasBypassing && this.bypassTail.length) {
+                toFeed = Buffer.concat([this.bypassTail, data])
+                this.suppressBytes = this.bypassTail.length
+            }
+            this.wasBypassing = false
+
+            // If the chunk ends shortly after a ZDLE, the header may continue
+            // in the next chunk — keep feeding the sentry until it resolves
+            this.feedNextChunk = zdleIndex !== -1 && data.length - zdleIndex < 24
+
             // No active session: sentry.consume() routes everything straight
             // back through to_terminal, so we must not output here as well or
             // the data would be duplicated. Only on a consume() failure do we
             // forward the raw data as a fallback so nothing is lost.
             try {
-                this.sentry.consume(data)
+                this.sentry.consume(toFeed)
             } catch (e) {
                 this.logger.error('zmodem detection error', e)
+                this.suppressBytes = 0
                 this.outputToTerminal.next(data)
             }
         }

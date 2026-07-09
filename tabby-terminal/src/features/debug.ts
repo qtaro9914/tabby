@@ -13,14 +13,29 @@ export class DebugDecorator extends TerminalDecorator {
     }
 
     attach (terminal: BaseTerminalTabComponent<any>): void {
-        let sessionOutputBuffer = ''
         const bufferLength = 8192
 
+        // Collect output as chunks and only join on demand — concatenating
+        // into a single string on every chunk is too expensive for a
+        // permanently attached debug helper
+        let chunks: string[] = []
+        let chunksLength = 0
+
         const handler = data => {
-            sessionOutputBuffer += data
-            if (sessionOutputBuffer.length > bufferLength) {
-                sessionOutputBuffer = sessionOutputBuffer.substring(sessionOutputBuffer.length - bufferLength)
+            chunks.push(data)
+            chunksLength += data.length
+            if (chunksLength > bufferLength * 2) {
+                const joined = chunks.join('').slice(-bufferLength)
+                chunks = [joined]
+                chunksLength = joined.length
             }
+        }
+
+        const getOutputBuffer = () => {
+            const joined = chunks.join('').slice(-bufferLength)
+            chunks = [joined]
+            chunksLength = joined.length
+            return joined
         }
         this.subscribeUntilDetached(terminal, terminal.sessionChanged$.subscribe(session => {
             this.subscribeUntilDetached(terminal, session?.output$.subscribe(handler))
@@ -47,7 +62,7 @@ export class DebugDecorator extends TerminalDecorator {
             }
             // Ctrl-Shift-Alt-5
             if (e.which === 53 && e.ctrlKey && e.shiftKey && e.altKey) {
-                this.doSaveOutput(sessionOutputBuffer)
+                this.doSaveOutput(getOutputBuffer())
             }
             // Ctrl-Shift-Alt-6
             if (e.which === 54 && e.ctrlKey && e.shiftKey && e.altKey) {
@@ -55,7 +70,7 @@ export class DebugDecorator extends TerminalDecorator {
             }
             // Ctrl-Shift-Alt-7
             if (e.which === 55 && e.ctrlKey && e.shiftKey && e.altKey) {
-                this.doCopyOutput(sessionOutputBuffer)
+                this.doCopyOutput(getOutputBuffer())
             }
             // Ctrl-Shift-Alt-8
             if (e.which === 56 && e.ctrlKey && e.shiftKey && e.altKey) {

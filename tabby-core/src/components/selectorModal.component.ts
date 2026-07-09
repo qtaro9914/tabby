@@ -19,12 +19,18 @@ export class SelectorModalComponent<T> {
     hasGroups = false
     @ViewChildren('item') itemChildren: QueryList<ElementRef>
     private preventEdit: boolean
+    private fuzzySearch: any = null
 
     constructor (public modalInstance: NgbActiveModal) {
         this.preventEdit = false
     }
 
     ngOnInit (): void {
+        this.fuzzySearch = new FuzzySearch(
+            this.options,
+            ['name', 'group', 'description'],
+            { sort: true },
+        )
         this.onFilterChange()
         this.hasGroups = this.options.some(x => x.group)
     }
@@ -82,12 +88,12 @@ export class SelectorModalComponent<T> {
             )
                 .filter(x => !x.freeInputPattern)
         } else {
-            // eslint-disable-next-line @typescript-eslint/restrict-plus-operands
-            this.filteredOptions = new FuzzySearch(
+            this.fuzzySearch ??= new FuzzySearch(
                 this.options,
                 ['name', 'group', 'description'],
                 { sort: true },
-            ).search(f)
+            )
+            this.filteredOptions = this.fuzzySearch.search(f)
 
             this.options.filter(x => x.freeInputPattern).sort(firstBy<SelectorOption<T>, number>(x => x.weight ?? 0)).forEach(freeOption => {
                 if (!this.filteredOptions.includes(freeOption)) {

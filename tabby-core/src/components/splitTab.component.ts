@@ -836,7 +836,7 @@ export class SplitTabComponent extends BaseTabComponent implements AfterViewInit
         tab.addEventListenerUntilDestroyed(ref.rootNodes[0], 'click', () => this.focus(tab))
         if (this.config.store.terminal.focusFollowsMouse) {
             tab.addEventListenerUntilDestroyed(ref.rootNodes[0], 'mousemove', () => {
-                if (this._spannerResizing) {
+                if (this._spannerResizing || this.focusedTab === tab && tab.hasFocus) {
                     return
                 }
                 this.focus(tab)
