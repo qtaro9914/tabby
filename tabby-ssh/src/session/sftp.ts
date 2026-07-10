@@ -26,7 +26,7 @@ export class SFTPFileHandle {
         if (!this.inner) {
             return Promise.resolve(new Uint8Array(0))
         }
-        return this.inner.read(256 * 1024)
+        return this.inner.read(1024 * 1024)
     }
 
     async write (chunk: Uint8Array): Promise<void> {
@@ -115,12 +115,15 @@ export class SFTPSession {
         const tempPath = path + '.tabby-upload'
         try {
             const handle = await this.open(tempPath, russh.OPEN_WRITE | russh.OPEN_CREATE)
-            while (true) {
-                const chunk = await transfer.read()
-                if (!chunk.length) {
-                    break
-                }
+            // Overlap reading the next local chunk with the in-flight network
+            // write. Only one read and one write are ever outstanding — the
+            // russh handle does not guarantee ordering for concurrent calls
+            let chunk = await transfer.read()
+            while (chunk.length) {
+                const nextChunk = transfer.read()
+                nextChunk.catch(() => undefined)
                 await handle.write(chunk)
+                chunk = await nextChunk
             }
             await handle.close()
             await this.unlink(path).catch(() => null)
@@ -137,12 +140,15 @@ export class SFTPSession {
         this.logger.info('Downloading', path)
         try {
             const handle = await this.open(path, russh.OPEN_READ)
-            while (true) {
-                const chunk = await handle.read()
-                if (!chunk.length) {
-                    break
-                }
+            // Overlap the next network read with writing the current chunk to
+            // the local file. Only one read is ever in flight — the russh
+            // handle does not guarantee ordering for concurrent reads
+            let chunk = await handle.read()
+            while (chunk.length) {
+                const nextChunk = handle.read()
+                nextChunk.catch(() => undefined)
                 await transfer.write(chunk)
+                chunk = await nextChunk
             }
             transfer.close()
             handle.close()
