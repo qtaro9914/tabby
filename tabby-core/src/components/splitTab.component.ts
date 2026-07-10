@@ -1,5 +1,5 @@
 import { Observable, Subject, takeWhile } from 'rxjs'
-import { Component, Injectable, ViewChild, ViewContainerRef, EmbeddedViewRef, AfterViewInit, OnDestroy, Injector } from '@angular/core'
+import { Component, Injectable, ViewChild, ViewContainerRef, EmbeddedViewRef, AfterViewInit, NgZone, OnDestroy, Injector } from '@angular/core'
 import { BaseTabComponent, BaseTabProcess, GetRecoveryTokenOptions } from './baseTab.component'
 import { TabRecoveryProvider, RecoveryToken } from '../api/tabRecovery'
 import { TabsService, NewTabParameters } from '../services/tabs.service'
@@ -260,6 +260,7 @@ export class SplitTabComponent extends BaseTabComponent implements AfterViewInit
         private hotkeys: HotkeysService,
         private tabsService: TabsService,
         private tabRecovery: TabRecoveryService,
+        private zone: NgZone,
         injector: Injector,
     ) {
         super(injector)
@@ -835,11 +836,17 @@ export class SplitTabComponent extends BaseTabComponent implements AfterViewInit
         this.viewRefs.set(tab, ref)
         tab.addEventListenerUntilDestroyed(ref.rootNodes[0], 'click', () => this.focus(tab))
         if (this.config.store.terminal.focusFollowsMouse) {
-            tab.addEventListenerUntilDestroyed(ref.rootNodes[0], 'mousemove', () => {
-                if (this._spannerResizing || this.focusedTab === tab && tab.hasFocus) {
-                    return
-                }
-                this.focus(tab)
+            // Register outside the zone — mousemove fires constantly and a
+            // zone-patched listener would trigger change detection on every
+            // event even when the handler does nothing. Re-enter the zone
+            // only when the focus actually changes.
+            this.zone.runOutsideAngular(() => {
+                tab.addEventListenerUntilDestroyed(ref.rootNodes[0], 'mousemove', () => {
+                    if (this._spannerResizing || this.focusedTab === tab && tab.hasFocus) {
+                        return
+                    }
+                    this.zone.run(() => this.focus(tab))
+                })
             })
         }
 

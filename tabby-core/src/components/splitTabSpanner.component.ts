@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/explicit-module-boundary-types */
-import { Component, Input, HostBinding, ElementRef, Output, EventEmitter } from '@angular/core'
+import { Component, Input, HostBinding, ElementRef, NgZone, Output, EventEmitter } from '@angular/core'
 import { SelfPositioningComponent } from './selfPositioning.component'
 import { SplitContainer } from './splitTab.component'
 
@@ -19,8 +19,10 @@ export class SplitTabSpannerComponent extends SelfPositioningComponent {
     @HostBinding('class.v') isVertical = true
     private marginOffset = -5
 
-    // eslint-disable-next-line @typescript-eslint/no-useless-constructor
-    constructor (element: ElementRef) {
+    constructor (
+        element: ElementRef,
+        private zone: NgZone,
+    ) {
         super(element)
     }
 
@@ -65,7 +67,13 @@ export class SplitTabSpannerComponent extends SelfPositioningComponent {
             }
 
             document.addEventListener('mouseup', offHandler, { passive: true })
-            this.element.nativeElement.parentElement.addEventListener('mousemove', dragHandler)
+            // The drag handler only writes to the element style directly —
+            // register it outside the zone so dragging does not run a full
+            // change detection pass per mousemove. The mouseup handler stays
+            // in the zone: it emits change/resizing and needs the UI updated.
+            this.zone.runOutsideAngular(() => {
+                this.element.nativeElement.parentElement.addEventListener('mousemove', dragHandler)
+            })
         }, { passive: true })
     }
 

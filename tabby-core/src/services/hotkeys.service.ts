@@ -90,20 +90,26 @@ export class HotkeysService {
             const hotkeys = await this.getHotkeyDescriptions()
             this.hotkeyDescriptions = hotkeys
 
+            // Registered outside the Angular zone: these fire for every key
+            // press and wheel event in the app, and a zone-patched listener
+            // triggers a full change detection pass per event. pushKeyEvent
+            // re-enters the zone explicitly when a hotkey actually matches.
             const registerEvent = (
                 eventType: 'keydown'|'keyup'|'wheel'|'mouseup'|'auxclick',
                 filterEvent?: (event: KeyboardEvent|WheelEvent|MouseEvent) => boolean,
             ) => {
-                document.addEventListener(eventType, event => {
-                    if (filterEvent && !filterEvent(event)) {
-                        return
-                    }
-                    this._keyEvent.next(event)
-                    this.pushKeyEvent(eventType, event)
-                    if (hostApp.platform === Platform.Web && this.matchActiveHotkey(true) !== null) {
-                        event.preventDefault()
-                        event.stopPropagation()
-                    }
+                this.zone.runOutsideAngular(() => {
+                    document.addEventListener(eventType, event => {
+                        if (filterEvent && !filterEvent(event)) {
+                            return
+                        }
+                        this._keyEvent.next(event)
+                        this.pushKeyEvent(eventType, event)
+                        if (hostApp.platform === Platform.Web && this.matchActiveHotkey(true) !== null) {
+                            event.preventDefault()
+                            event.stopPropagation()
+                        }
+                    })
                 })
             }
 
@@ -214,22 +220,25 @@ export class HotkeysService {
         }
 
         const matched = this.matchActiveHotkey()
-        this.zone.run(() => {
-            if (matched) {
-                if (this.recognitionPhase) {
-                    this.emitHotkeyOn(matched)
-                    if (eventName === 'wheel' || eventName === 'mouseup' || eventName === 'auxclick') {
-                        this.emitHotkeyOff(matched)
+        // Only enter the Angular zone when a hotkey actually fires —
+        // unconditionally entering it here would run change detection on
+        // every single key event
+        if (matched !== null || this.pressedHotkey !== null) {
+            this.zone.run(() => {
+                if (matched) {
+                    if (this.recognitionPhase) {
+                        this.emitHotkeyOn(matched)
+                        if (eventName === 'wheel' || eventName === 'mouseup' || eventName === 'auxclick') {
+                            this.emitHotkeyOff(matched)
+                        }
                     }
+                } else if (this.pressedHotkey) {
+                    this.emitHotkeyOff(this.pressedHotkey)
                 }
-            } else if (this.pressedHotkey) {
-                this.emitHotkeyOff(this.pressedHotkey)
-            }
-        })
+            })
+        }
 
-        this.zone.run(() => {
-            this._key.next(getKeyName(eventData))
-        })
+        this._key.next(getKeyName(eventData))
 
         if (process.platform === 'darwin' && eventData.metaKey && eventName === 'keydown' && !['Ctrl', 'Shift', altKeyName, metaKeyName, 'Enter'].includes(keyName)) {
             // macOS will swallow non-modified keyups if Cmd is held down

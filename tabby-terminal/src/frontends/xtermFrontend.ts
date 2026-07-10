@@ -1,6 +1,6 @@
 import deepEqual from 'deep-equal'
 import { BehaviorSubject, filter, firstValueFrom, fromEvent, takeUntil } from 'rxjs'
-import { Injector } from '@angular/core'
+import { Injector, NgZone } from '@angular/core'
 import { ConfigService, getCSSFontFamily, getWindows10Build, HostAppService, HotkeysService, Platform, PlatformService, TerminalColorScheme, ThemesService } from 'tabby-core'
 import { Frontend, SearchOptions, SearchState } from './frontend'
 import { Terminal, ITheme } from '@xterm/xterm'
@@ -95,6 +95,7 @@ export class XTermFrontend extends Frontend {
     private platformService: PlatformService
     private hostApp: HostAppService
     private themes: ThemesService
+    private zone: NgZone
 
     constructor (injector: Injector) {
         super(injector)
@@ -103,6 +104,7 @@ export class XTermFrontend extends Frontend {
         this.platformService = injector.get(PlatformService)
         this.hostApp = injector.get(HostAppService)
         this.themes = injector.get(ThemesService)
+        this.zone = injector.get(NgZone)
 
         this.xterm = new Terminal({
             allowTransparency: true,
@@ -355,14 +357,19 @@ export class XTermFrontend extends Frontend {
         // unpin (see constructor comment). Use capture phase — xterm.js
         // handles wheel/key events on its internal viewport element and may
         // stop propagation, so bubbling listeners on host would never fire.
-        host.addEventListener('wheel', (event: WheelEvent) => {
-            // Immediately unpin on scroll-up so that writes arriving before
-            // the next animation frame don't yank the viewport back down.
-            if (event.deltaY < 0) {
-                this.pinnedToBottom = false
-            }
-            requestAnimationFrame(() => this.updatePinnedState())
-        }, { capture: true, passive: true })
+        // Registered outside the Angular zone: scrolling only mutates
+        // frontend-internal pin state, and a zone-patched wheel listener
+        // would trigger a full change detection pass per wheel event
+        this.zone.runOutsideAngular(() => {
+            host.addEventListener('wheel', (event: WheelEvent) => {
+                // Immediately unpin on scroll-up so that writes arriving before
+                // the next animation frame don't yank the viewport back down.
+                if (event.deltaY < 0) {
+                    this.pinnedToBottom = false
+                }
+                requestAnimationFrame(() => this.updatePinnedState())
+            }, { capture: true, passive: true })
+        })
 
 
         this.hotkeysService.hotkey$
@@ -392,7 +399,11 @@ export class XTermFrontend extends Frontend {
 
         host.addEventListener('mousedown', event => this.mouseEvent.next(event))
         host.addEventListener('mouseup', event => this.mouseEvent.next(event))
-        host.addEventListener('mousewheel', event => this.mouseEvent.next(event as MouseEvent))
+        // Outside the zone: the wheel consumer only forwards alt+wheel as
+        // arrow-key input, which needs no change detection
+        this.zone.runOutsideAngular(() => {
+            host.addEventListener('mousewheel', event => this.mouseEvent.next(event as MouseEvent))
+        })
         host.addEventListener('contextmenu', event => {
             event.preventDefault()
             event.stopPropagation()
