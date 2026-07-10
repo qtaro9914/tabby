@@ -45,17 +45,30 @@ async function setup (cdp) {
         const core = require('tabby-core')
         const profiles = injector.get(core.ProfilesService)
         const app = injector.get(core.AppService)
+        // CDP evaluations run OUTSIDE the Angular zone; tab mutations must
+        // happen inside it or change detection never renders the tab body
+        const ngZone = injector.get(require('@angular/core').NgZone)
         const list = await profiles.getProfiles()
         const local = list.find(p => p.type === 'local')
         if (!local) { throw new Error('no local profile') }
         const before = new Set(app.tabs)
-        const tab = await profiles.openNewTabForProfile(local)
+        const tab = await ngZone.run(() => profiles.openNewTabForProfile(local))
         if (!tab) { throw new Error('openNewTabForProfile returned null') }
         for (const t of [...app.tabs]) {
-            if (before.has(t)) { try { await app.closeTab(t, false) } catch {} }
+            if (before.has(t)) { try { await ngZone.run(() => app.closeTab(t, false)) } catch {} }
         }
+        // closing the pre-existing tabs can steal selection from the new tab
+        // mid-initialization — re-select the surviving (wrapper) tab explicitly
         const term = tab.getAllTabs ? tab.getAllTabs()[0] : tab
-        for (let i = 0; i < 40 && !term.session; i++) { await new Promise(r => setTimeout(r, 500)) }
+        const selectOurs = () => ngZone.run(() => {
+            const wrapper = app.tabs.find(t => t === tab || (t.getAllTabs?.() ?? []).includes(term))
+            if (wrapper && app.activeTab !== wrapper) { app.selectTab(wrapper) }
+        })
+        selectOurs()
+        for (let i = 0; i < 40 && !term.session; i++) {
+            if (i % 4 === 3) { selectOurs() }
+            await new Promise(r => setTimeout(r, 500))
+        }
         if (!term.session) { throw new Error('session never started on ' + term.constructor.name) }
         await new Promise(r => setTimeout(r, 1500))
         window.__perf = { injector, core, app, profiles, localProfile: local, tab, term, bytes: 0, lastGrowth: 0, t0: 0 }

@@ -104,15 +104,42 @@ read-ahead付き転送ループ、のどちらかが入らない限り、多重i
 RTT隠蔽（WANで数倍の効果が見込める）は実現できない。upstream
 （Eugeny/russh バインディング）への提案・実装が Phase 2 の最有力候補。
 
-## 4. 更新後のロードマップ
+## 4. Phase 2候補B: フロー制御ウィンドウの実験結果（仮説棄却）
+
+`app/lib/pty.ts` に環境変数ノブ（`TABBY_FLOW_MAX_DELTA` / `TABBY_FLOW_MAX_CHUNK`）を
+追加し、S1相当のスループットとCtrl+C応答性（^C送信→出力静止までの時間と流入量）を
+7構成で計測（2026-07-10、WSL2 devビルド）:
+
+| maxDelta | maxChunk | MB/s | ^C静止 | ^C後流入 |
+|---|---|---|---|---|
+| 512KB（現行） | 100KB（現行） | 9.9 | 36ms | 351KB |
+| 1MB | 100KB | 10.7 | 25ms | 227KB |
+| 2MB | 100KB | 9.9 | 40ms | 324KB |
+| 4MB | 100KB | 10.8 | 30ms | 264KB |
+| 8MB | 100KB | 10.1 | 26ms | 191KB |
+| 2MB | 256KB | 10.4 | 36ms | 248KB |
+| 4MB | 256KB | 8.6 | 40ms | 372KB |
+
+**結論: ウィンドウを16倍にしてもスループットは~10MB/sでフラット（差は測定ノイズ）。
+「フロー制御ウィンドウが律速」仮説は棄却**。真の律速はレンダラの毎バイト処理
+（xterm.jsのANSIパース）で、フロー制御はその消費速度に正しく追従している。
+現行既定値（512KB/100KB）は適正であり**変更しない**。
+
+- 環境変数ノブは残置 — Windows実機（ConPTY）では特性が異なる可能性があり、
+  リビルドなしで `TABBY_FLOW_MAX_DELTA=4194304` 等を試せる
+- ハーネス上の知見: B2適用後はCDP経由のタブ操作を `NgZone.run()` で包む必要がある
+  （zone外からの状態変更はCDが走らずタブが描画されない。実UI操作はzone内なので
+  実アプリには影響なし）— `scripts/perf/profiler.mjs` に反映済み
+
+## 5. 更新後のロードマップ
 
 | 項目 | 状態 |
 |---|---|
 | Phase 1 TSクイックフィックス | ✅ 完了（+62% throughput 等） |
-| B2 zone外化（第1弾: wheel/drag/focusFollowsMouse） | ✅ 完了 |
+| B2 zone外化（wheel/drag/focusFollowsMouse/hotkeys） | ✅ 完了（S2 245→10.9µs） |
 | D1 安全域のSFTP改善（オーバーラップ+1MB） | ✅ 完了（localhost +29%） |
 | mainプロセス計測 | ✅ 完了 — CPU律速ではないと判明 |
-| **Phase 2候補A**: russhへのSFTP read-ahead実装（Rust） | 証拠付きで確定、upstream連携 |
-| **Phase 2候補B**: PTYフロー制御ウィンドウの適応化（TS） | スループット向上の正攻法として浮上 |
-| Phase 2候補C: 出力ミドルウェアのRust化 | **優先度降格**（両プロセスともCPU非飽和のため） |
-| Phase 3: 端末コアRust/WASM化 | 保留のまま（xterm.js残余 ~20%、飽和なし） |
+| Phase 2候補B: フロー制御ウィンドウ調整 | ✅ **実験の結果、変更不要と判断**（本節） |
+| **Phase 2候補A**: russhへのSFTP read-ahead実装（Rust） | 証拠付きで確定、upstream連携。**次の本命** |
+| Phase 2候補C: 出力ミドルウェアのRust化 | 優先度降格（両プロセスともCPU非飽和のため） |
+| Phase 3: 端末コアRust/WASM化 | ローカル出力スループットの唯一の上限要因と確定したが、10MB/s＋UI応答性維持で実用十分のため保留 |

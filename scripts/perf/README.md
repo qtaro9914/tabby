@@ -82,3 +82,9 @@ prior `profiler.mjs` run in the same app instance (reuses `window.__perf`).
   absolute values across build types.
 - CDP `Runtime.evaluate` must receive `awaitPromise` as a boolean — passing
   anything else makes the call fail silently.
+- CDP evaluations run outside the Angular zone. Any state mutation that
+  needs rendering (opening/selecting/closing tabs) must be wrapped in
+  `injector.get(require('@angular/core').NgZone).run(...)` — without it the
+  tab body is never rendered and the terminal session never starts.
+- PTY flow control can be tuned per launch via `TABBY_FLOW_MAX_DELTA` /
+  `TABBY_FLOW_MAX_CHUNK` (bytes; see `app/lib/pty.ts`).

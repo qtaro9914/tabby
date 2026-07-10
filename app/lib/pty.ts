@@ -8,8 +8,8 @@ import { Subject, debounceTime } from 'rxjs'
 class PTYDataQueue {
     private buffers: Buffer[] = []
     private delta = 0
-    private maxChunk = 1024 * 100
-    private maxDelta = this.maxChunk * 5
+    private maxChunk = parseInt(process.env.TABBY_FLOW_MAX_CHUNK ?? '') || 1024 * 100
+    private maxDelta = parseInt(process.env.TABBY_FLOW_MAX_DELTA ?? '') || this.maxChunk * 5
     private flowPaused = false
     private decoder = new UTF8Splitter()
     private output$ = new Subject<Buffer>()
