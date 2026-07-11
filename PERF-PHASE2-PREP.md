@@ -140,6 +140,55 @@ RTT隠蔽（WANで数倍の効果が見込める）は実現できない。upstr
 | D1 安全域のSFTP改善（オーバーラップ+1MB） | ✅ 完了（localhost +29%） |
 | mainプロセス計測 | ✅ 完了 — CPU律速ではないと判明 |
 | Phase 2候補B: フロー制御ウィンドウ調整 | ✅ **実験の結果、変更不要と判断**（本節） |
-| **Phase 2候補A**: russhへのSFTP read-ahead実装（Rust） | 証拠付きで確定、upstream連携。**次の本命** |
+| **Phase 2候補A**: russhへのSFTP read-ahead実装（Rust） | ✅ **実装完了（2026-07-11、下記6節）** |
 | Phase 2候補C: 出力ミドルウェアのRust化 | 優先度降格（両プロセスともCPU非飽和のため） |
 | Phase 3: 端末コアRust/WASM化 | ローカル出力スループットの唯一の上限要因と確定したが、10MB/s＋UI応答性維持で実用十分のため保留 |
+
+## 6. Phase 2候補A: russh-napiへの`readAt`実装（2026-07-11実施）
+
+フォークした `qtaro9914/russh-napi`（ブランチ `feat/sftp-read-at`、ローカル
+`~/work/russh-napi`）に位置指定readを実装した。
+
+### 実装内容
+
+- **`SftpFile.readAt(offset, n)`**: 絶対オフセットでの単発プロトコルREAD。
+  SFTPのリクエストID多重化により**複数readAtの同時in-flightが安全**
+  （カーソル型`read()`はMutexのwakeup順序が不定で×8並行時にデータ破損を実証済み）。
+  EOFは空配列で返す。サーバの`limits@openssh.com` read上限を超える要求はクランプ
+- **`SftpFile.readLimit()`**: サーバ広告のread上限（OpenSSH=261120B）を公開。
+  呼び出し側が最適チャンクサイズを選べる
+- russh-sftp 2.0.6 に追加アクセサ3点（`raw_handle`/`raw_session`/`configured_limits`）
+  が必要 → crates.ioソースそのままにパッチを当てた**vendoredコピー**を
+  `vendored/russh-sftp` としてrusshi-napiリポジトリに同梱（`[patch.crates-io]`適用、
+  upstream取り込み後に撤去予定）
+- オフセットはf64（2^53=9PBまで正確）。napiのBigIntフィーチャー追加を回避
+
+### 検証（ローカルsshd、50MB、sha256全数照合）
+
+| 方式 | スループット | 整合性 |
+|---|---|---|
+| 現行実装（カーソル逐次＋書込オーバーラップ、1MB） | 96 MB/s | OK |
+| readAt ×4（261120Bチャンク） | 176 MB/s | OK |
+| **readAt ×8 ← 採用** | **237 MB/s（現行比 約2.5倍）** | OK（反復4回すべて） |
+| readAt ×16 | 250 MB/s | OK |
+
+カーソルread×8で破損した並行度が、readAtでは全数一致。深度8が性能の膝。
+RTTの大きい実リンクでは相対効果はさらに拡大する（in-flight窓 ≈ 8×255KB ≈ 2MB）。
+
+### Tabby側の対応（`tabby-ssh/src/session/sftp.ts`）
+
+- `download()` は `readAt` 対応バインディング検出時に**深度8の先読みパイプライン**
+  （チャンク=readLimit、short read再要求つき）で転送。**非対応（stock npm russh）
+  ならば従来の安全な逐次＋オーバーラップにフォールバック**するため、
+  `app/package.json` を差し替えるまでは従来動作のまま壊れない
+- upload側のパイプライン化（`writeAt`）は同じパターンで実装可能な将来課題
+
+### 残作業（fork配布パイプライン）
+
+1. `git push -u origin feat/sftp-read-at`（権限の都合で手元実行が必要）
+2. fork側CI（napi-rsマルチプラットフォームビルド）で7バイナリ入りのnpm tarballを生成し
+   GitHub Releasesへ添付
+3. Tabbyの `app/package.json` の `russh` をそのtarball URLに変更 → Windows Actions
+   ビルドにreadAtが乗る
+4. upstream還元: russh-sftpへアクセサPR ＋ russh-napiへreadAt PR（データ破損の
+   再現手順付き）。取り込まれたらvendoredコピーと参照を公式版に戻す
