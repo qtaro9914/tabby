@@ -183,12 +183,13 @@ RTTの大きい実リンクでは相対効果はさらに拡大する（in-fligh
   `app/package.json` を差し替えるまでは従来動作のまま壊れない
 - upload側のパイプライン化（`writeAt`）は同じパターンで実装可能な将来課題
 
-### 残作業（fork配布パイプライン）
+### 配布パイプライン（2026-07-11 完了）
 
-1. `git push -u origin feat/sftp-read-at`（権限の都合で手元実行が必要）
-2. fork側CI（napi-rsマルチプラットフォームビルド）で7バイナリ入りのnpm tarballを生成し
-   GitHub Releasesへ添付
-3. Tabbyの `app/package.json` の `russh` をそのtarball URLに変更 → Windows Actions
-   ビルドにreadAtが乗る
-4. upstream還元: russh-sftpへアクセサPR ＋ russh-napiへreadAt PR（データ破損の
+1. ✅ fork push・CI実行（run 29140477604、7ターゲット全成功。注意: ワークフローの
+   `paths-ignore` により空コミットではCIが走らない。`workflow_dispatch` を追加済み）
+2. ✅ GitHub Release **v0.1.38-readat.0** にnpm tarball添付
+   （win32-x64/arm64・darwin-x64/arm64・linux-x64/arm64/armv7 のprebuilt同梱）
+3. ✅ `app/package.json` の `russh` をRelease URLに変更・`yarn`で導入確認。
+   **Release artifact現物での再計測: 98 → 224 MB/s（×8、sha256一致）**
+4. 残: upstream還元 — russh-sftpへアクセサPR ＋ russh-napiへreadAt PR（データ破損の
    再現手順付き）。取り込まれたらvendoredコピーと参照を公式版に戻す
