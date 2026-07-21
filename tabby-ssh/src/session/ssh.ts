@@ -491,88 +491,97 @@ export class SSHSession {
         }
 
         for (const fw of this.profile.options.forwardedPorts) {
-            this.addPortForward(Object.assign(new ForwardedPort(), fw))
+            await this.addPortForward(Object.assign(new ForwardedPort(), fw))
         }
 
         this.open = true
 
         this.ssh.tcpChannelOpen$.subscribe(async event => {
-            this.logger.info(`Incoming forwarded connection: ${event.clientAddress}:${event.clientPort} -> ${event.targetAddress}:${event.targetPort}`)
+            try {
+                this.logger.info(`Incoming forwarded connection: ${event.clientAddress}:${event.clientPort} -> ${event.targetAddress}:${event.targetPort}`)
 
-            if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {
-                throw new Error('Cannot open agent channel before auth')
+                if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {
+                    throw new Error('Cannot open forwarded channel before auth')
+                }
+
+                const channel = await this.ssh.activateChannel(event.channel)
+
+                const forward = this.forwardedPorts.find(x => x.port === event.targetPort && x.host === event.targetAddress)
+                if (!forward) {
+                    this.emitServiceMessage(colors.bgRed.black(' X ') + ` Rejected incoming forwarded connection for unrecognized port ${event.targetAddress}:${event.targetPort}`)
+                    await channel.close()
+                    return
+                }
+
+                const socket = new Socket()
+                socket.connect(forward.targetPort, forward.targetAddress)
+                socket.on('error', e => {
+                    // eslint-disable-next-line @typescript-eslint/no-base-to-string
+                    this.emitServiceMessage(colors.bgRed.black(' X ') + ` Could not forward the remote connection to ${forward.targetAddress}:${forward.targetPort}: ${e}`)
+                })
+
+                this.setupSocketChannelEvents(channel, socket, 'Remote forward')
+
+                socket.on('connect', () => {
+                    this.logger.info('Connection forwarded')
+                })
+            } catch (error) {
+                this.logger.error('Could not handle incoming forwarded connection', error)
             }
-
-            const channel = await this.ssh.activateChannel(event.channel)
-
-            const forward = this.forwardedPorts.find(x => x.port === event.targetPort && x.host === event.targetAddress)
-            if (!forward) {
-                this.emitServiceMessage(colors.bgRed.black(' X ') + ` Rejected incoming forwarded connection for unrecognized port ${event.targetAddress}:${event.targetPort}`)
-                channel.close()
-                return
-            }
-
-            const socket = new Socket()
-            socket.connect(forward.targetPort, forward.targetAddress)
-            socket.on('error', e => {
-                // eslint-disable-next-line @typescript-eslint/no-base-to-string
-                this.emitServiceMessage(colors.bgRed.black(' X ') + ` Could not forward the remote connection to ${forward.targetAddress}:${forward.targetPort}: ${e}`)
-                channel.close()
-            })
-
-            this.setupSocketChannelEvents(channel, socket, 'Remote forward')
-
-            socket.on('connect', () => {
-                this.logger.info('Connection forwarded')
-            })
         })
 
         this.ssh.x11ChannelOpen$.subscribe(async event => {
-            this.logger.info(`Incoming X11 connection from ${event.clientAddress}:${event.clientPort}`)
-            const displaySpec = (this.config.store.ssh.x11Display || process.env.DISPLAY) ?? 'localhost:0'
-            this.logger.debug(`Trying display ${displaySpec}`)
-
-            if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {
-                throw new Error('Cannot open agent channel before auth')
-            }
-
-            const channel = await this.ssh.activateChannel(event.channel)
-
-            const socket = new X11Socket()
             try {
-                const x11Stream = await socket.connect(displaySpec)
-                this.logger.info('Connection forwarded')
-                this.setupSocketChannelEvents(channel, x11Stream, 'X11 forward')
-            } catch (e) {
-                // eslint-disable-next-line @typescript-eslint/no-base-to-string
-                this.emitServiceMessage(colors.bgRed.black(' X ') + ` Could not connect to the X server: ${e}`)
-                this.emitServiceMessage(`    Tabby tried to connect to ${JSON.stringify(X11Socket.resolveDisplaySpec(displaySpec))} based on the DISPLAY environment var (${displaySpec})`)
-                if (process.platform === 'win32') {
-                    this.emitServiceMessage('    To use X forwarding, you need a local X server, e.g.:')
-                    this.emitServiceMessage('    * VcXsrv: https://sourceforge.net/projects/vcxsrv/')
-                    this.emitServiceMessage('    * Xming: https://sourceforge.net/projects/xming/')
+                this.logger.info(`Incoming X11 connection from ${event.clientAddress}:${event.clientPort}`)
+                const displaySpec = (this.config.store.ssh.x11Display || process.env.DISPLAY) ?? 'localhost:0'
+                this.logger.debug(`Trying display ${displaySpec}`)
+
+                if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {
+                    throw new Error('Cannot open X11 channel before auth')
                 }
-                channel.close()
+
+                const channel = await this.ssh.activateChannel(event.channel)
+
+                const socket = new X11Socket()
+                try {
+                    const x11Stream = await socket.connect(displaySpec)
+                    this.logger.info('Connection forwarded')
+                    this.setupSocketChannelEvents(channel, x11Stream, 'X11 forward')
+                } catch (e) {
+                    // eslint-disable-next-line @typescript-eslint/no-base-to-string
+                    this.emitServiceMessage(colors.bgRed.black(' X ') + ` Could not connect to the X server: ${e}`)
+                    this.emitServiceMessage(`    Tabby tried to connect to ${JSON.stringify(X11Socket.resolveDisplaySpec(displaySpec))} based on the DISPLAY environment var (${displaySpec})`)
+                    if (process.platform === 'win32') {
+                        this.emitServiceMessage('    To use X forwarding, you need a local X server, e.g.:')
+                        this.emitServiceMessage('    * VcXsrv: https://sourceforge.net/projects/vcxsrv/')
+                        this.emitServiceMessage('    * Xming: https://sourceforge.net/projects/xming/')
+                    }
+                    await channel.close()
+                }
+            } catch (error) {
+                this.logger.error('Could not handle incoming X11 connection', error)
             }
         })
 
         this.ssh.agentChannelOpen$.subscribe(async newChannel => {
-            if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {
-                throw new Error('Cannot open agent channel before auth')
+            try {
+                if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {
+                    throw new Error('Cannot open agent channel before auth')
+                }
+
+                const channel = await this.ssh.activateChannel(newChannel)
+
+                const spec = await this.getAgentConnectionSpec()
+                if (!spec) {
+                    await channel.close()
+                    return
+                }
+
+                const agent = await russh.SSHAgentStream.connect(spec)
+                this.setupAgentChannelEvents(channel, agent)
+            } catch (error) {
+                this.logger.error('Could not handle agent forwarding connection', error)
             }
-
-            const channel = await this.ssh.activateChannel(newChannel)
-
-            const spec = await this.getAgentConnectionSpec()
-            if (!spec) {
-                await channel.close()
-                return
-            }
-
-            const agent = await russh.SSHAgentStream.connect(spec)
-            channel.data$.subscribe(data => agent.write(data))
-            agent.data$.subscribe(data => channel.write(data), undefined, () => channel.close())
-            channel.closed$.subscribe(() => agent.close())
         })
     }
 
@@ -879,23 +888,78 @@ export class SSHSession {
     }
 
     private setupSocketChannelEvents (channel: russh.Channel, socket: Socket, logPrefix: string): void {
-        // Channel → Socket data flow with error handling
-        channel.data$.subscribe({
-            next: data => socket.write(data),
-            error: err => {
-                this.logger.error(`${logPrefix}: channel data error: ${err}`)
-                socket.destroy()
-            },
-        })
+        const MAX_PENDING_SOCKET_BYTES = 8 * 1024 * 1024
+        const pendingSocketWrites: Buffer[] = []
+        let pendingSocketBytes = 0
+        let socketBackpressured = false
+        let closed = false
+        let channelCloseRequested = false
+        let channelWrite = Promise.resolve()
 
-        // Socket → Channel data flow with proper conversion
-        socket.on('data', data => {
-            try {
-                channel.write(new Uint8Array(data.buffer, data.byteOffset, data.byteLength))
-            } catch (err) {
-                this.logger.error(`${logPrefix}: channel write error: ${err}`)
-                socket.destroy(new Error(`${logPrefix}failed to write to channel: ${err}`))
+        const closeChannel = () => {
+            if (channelCloseRequested) {
+                return
             }
+            channelCloseRequested = true
+            void channel.close().catch(error => {
+                this.logger.debug(`${logPrefix}: channel close failed: ${error}`)
+            })
+        }
+        const fail = (error: unknown) => {
+            if (closed) {
+                return
+            }
+            closed = true
+            this.logger.error(`${logPrefix}: forwarding failed: ${error}`)
+            pendingSocketWrites.length = 0
+            pendingSocketBytes = 0
+            socket.destroy()
+            closeChannel()
+        }
+        const flushSocketWrites = () => {
+            if (closed) {
+                return
+            }
+            socketBackpressured = false
+            while (pendingSocketWrites.length) {
+                const data = pendingSocketWrites.shift()!
+                pendingSocketBytes -= data.length
+                if (!socket.write(data)) {
+                    socketBackpressured = true
+                    break
+                }
+            }
+        }
+
+        channel.data$.subscribe({
+            next: data => {
+                if (closed) {
+                    return
+                }
+                const buffer = Buffer.from(data)
+                if (!socketBackpressured && !pendingSocketWrites.length) {
+                    socketBackpressured = !socket.write(buffer)
+                    return
+                }
+                pendingSocketWrites.push(buffer)
+                pendingSocketBytes += buffer.length
+                if (pendingSocketBytes > MAX_PENDING_SOCKET_BYTES) {
+                    fail(new Error(`socket write queue exceeded ${MAX_PENDING_SOCKET_BYTES} bytes`))
+                }
+            },
+            error: fail,
+        })
+        socket.on('drain', flushSocketWrites)
+
+        socket.on('data', data => {
+            socket.pause()
+            channelWrite = channelWrite.then(() =>
+                channel.write(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)),
+            ).then(() => {
+                if (!closed) {
+                    socket.resume()
+                }
+            }).catch(fail)
         })
 
         // Handle EOF from remote
@@ -907,26 +971,59 @@ export class SSHSession {
         // Handle channel close
         channel.closed$.subscribe(() => {
             this.logger.debug(`${logPrefix}: channel closed, destroying socket`)
+            closed = true
             socket.destroy()
         })
 
         // Handle socket errors
         socket.on('error', err => {
-            this.logger.error(`${logPrefix}: socket error: ${err}`)
-            channel.close()
+            fail(err)
         })
 
         // Handle socket close
         socket.on('close', () => {
             this.logger.debug(`${logPrefix}: socket closed, closing channel`)
-            channel.close()
+            closed = true
+            closeChannel()
         })
 
         // Handle EOF from local
         socket.on('end', () => {
             this.logger.debug(`${logPrefix}: socket end, sending EOF to channel`)
-            channel.eof()
+            void channel.eof().catch(fail)
         })
+    }
+
+    private setupAgentChannelEvents (channel: russh.Channel, agent: russh.SSHAgentStream): void {
+        let closed = false
+        let agentWrite = Promise.resolve()
+        let channelWrite = Promise.resolve()
+        const close = (error?: unknown) => {
+            if (closed) {
+                return
+            }
+            closed = true
+            if (error) {
+                this.logger.error('Agent forwarding failed', error)
+            }
+            void agent.close().catch(() => undefined)
+            void channel.close().catch(() => undefined)
+        }
+
+        channel.data$.subscribe({
+            next: data => {
+                agentWrite = agentWrite.then(() => agent.write(data)).catch(close)
+            },
+            error: close,
+        })
+        agent.data$.subscribe({
+            next: data => {
+                channelWrite = channelWrite.then(() => channel.write(data)).catch(close)
+            },
+            error: close,
+            complete: () => close(),
+        })
+        channel.closed$.subscribe(() => close())
     }
 
     async loadPrivateKey (name: string, privateKeyContents: Buffer): Promise<russh.KeyPair> {

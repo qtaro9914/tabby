@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { ipcMain } from 'electron'
 import { Application } from './app'
 import { UTF8Splitter } from './utfSplitter'
-import { Subject, debounceTime } from 'rxjs'
+import { Subject, Subscription, debounceTime } from 'rxjs'
 
 class PTYDataQueue {
     private buffers: Buffer[] = []
@@ -13,9 +13,11 @@ class PTYDataQueue {
     private flowPaused = false
     private decoder = new UTF8Splitter()
     private output$ = new Subject<Buffer>()
+    private outputSubscription: Subscription
+    private disposed = false
 
     constructor (private pty: nodePTY.IPty, private onData: (data: Buffer) => void) {
-        this.output$.pipe(debounceTime(500)).subscribe(() => {
+        this.outputSubscription = this.output$.pipe(debounceTime(500)).subscribe(() => {
             const remainder = this.decoder.flush()
             if (remainder.length) {
                 this.onData(remainder)
@@ -24,16 +26,45 @@ class PTYDataQueue {
     }
 
     push (data: Buffer) {
+        if (this.disposed) {
+            return
+        }
         this.buffers.push(data)
         this.maybeEmit()
     }
 
     ack (length: number) {
+        if (this.disposed) {
+            return
+        }
         this.delta -= length
         this.maybeEmit()
     }
 
+    dispose (): void {
+        if (this.disposed) {
+            return
+        }
+        this.disposed = true
+        if (this.buffers.length) {
+            const remainder = this.decoder.write(Buffer.concat(this.buffers))
+            if (remainder.length) {
+                this.onData(remainder)
+            }
+        }
+        const decoderRemainder = this.decoder.flush()
+        if (decoderRemainder.length) {
+            this.onData(decoderRemainder)
+        }
+        this.buffers = []
+        this.outputSubscription.unsubscribe()
+        this.output$.complete()
+    }
+
     private maybeEmit () {
+        if (this.disposed) {
+            return
+        }
         if (this.delta <= this.maxDelta && this.flowPaused) {
             this.resume()
             return
@@ -92,7 +123,7 @@ export class PTY {
     private outputQueue: PTYDataQueue
     exited = false
 
-    constructor (private id: string, private app: Application, ...args: any[]) {
+    constructor (private id: string, private app: Application, onExit: () => void, ...args: any[]) {
         this.pty = (nodePTY as any).spawn(...args)
         for (const key of ['close', 'exit']) {
             (this.pty as any).on(key, (...eventArgs) => this.emit(key, ...eventArgs))
@@ -105,6 +136,8 @@ export class PTY {
         this.pty.onData(data => this.outputQueue.push(Buffer.from(data)))
         this.pty.onExit(() => {
             this.exited = true
+            this.outputQueue.dispose()
+            onExit()
         })
     }
 
@@ -138,37 +171,43 @@ export class PTY {
 }
 
 export class PTYManager {
-    private ptys: Record<string, PTY|undefined> = {}
+    private ptys = new Map<string, PTY>()
 
     init (app: Application): void {
         ipcMain.on('pty:spawn', (event, ...options) => {
             const id = uuidv4().toString()
             event.returnValue = id
-            this.ptys[id] = new PTY(id, app, ...options)
+            const pty = new PTY(id, app, () => {
+                if (this.ptys.get(id) === pty) {
+                    this.ptys.delete(id)
+                }
+            }, ...options)
+            this.ptys.set(id, pty)
         })
 
         ipcMain.on('pty:exists', (event, id) => {
-            event.returnValue = this.ptys[id] && !this.ptys[id].exited
+            const pty = this.ptys.get(id)
+            event.returnValue = !!pty && !pty.exited
         })
 
         ipcMain.on('pty:get-pid', (event, id) => {
-            event.returnValue = this.ptys[id]?.getPID()
+            event.returnValue = this.ptys.get(id)?.getPID()
         })
 
         ipcMain.on('pty:resize', (_event, id, columns, rows) => {
-            this.ptys[id]?.resize(columns, rows)
+            this.ptys.get(id)?.resize(columns, rows)
         })
 
         ipcMain.on('pty:write', (_event, id, data) => {
-            this.ptys[id]?.write(Buffer.from(data))
+            this.ptys.get(id)?.write(Buffer.from(data))
         })
 
         ipcMain.on('pty:kill', (_event, id, signal) => {
-            this.ptys[id]?.kill(signal)
+            this.ptys.get(id)?.kill(signal)
         })
 
         ipcMain.on('pty:ack-data', (_event, id, length) => {
-            this.ptys[id]?.ackData(length)
+            this.ptys.get(id)?.ackData(length)
         })
     }
 }
