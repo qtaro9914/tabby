@@ -21,11 +21,16 @@ export interface MessageBoxResult {
 }
 
 export type FileTransferState = 'running'|'finalizing'|'succeeded'|'failed'|'cancelled'
+export type FileTransferDirection = 'upload'|'download'
 
 export abstract class FileTransfer {
     abstract getName (): string
     abstract getSize (): number
     abstract close (): void
+
+    getDirection (): FileTransferDirection {
+        return 'upload'
+    }
 
     async finalize (): Promise<void> {
         this.close()
@@ -142,11 +147,27 @@ export abstract class FileTransfer {
 
 export abstract class FileDownload extends FileTransfer {
     abstract write (buffer: Uint8Array): Promise<void>
+
+    getDirection (): FileTransferDirection {
+        return 'download'
+    }
 }
 
 export abstract class DirectoryDownload extends FileTransfer {
     abstract createDirectory (relativePath: string): Promise<void>
     abstract createFile (relativePath: string, mode: number, size: number): Promise<FileDownload>
+
+    getDirection (): FileTransferDirection {
+        return 'download'
+    }
+
+    async createSymbolicLink (relativePath: string, target: string, targetIsDirectory: boolean): Promise<void> {
+        throw new Error('Symbolic link downloads are unsupported on this platform')
+    }
+
+    setDirectoryMode (relativePath: string, mode: number): Promise<void> {
+        return Promise.resolve()
+    }
 
     reportFileCompleted (size: number): void {
         this.increaseProgress(size)
@@ -184,12 +205,14 @@ export interface FileUploadOptions {
 export class DirectoryUpload {
     private childrens: (FileUpload|DirectoryUpload)[] = []
 
-    constructor (private name = '') {
-        // Just set name for now.
-    }
+    constructor (private name = '', private mode = 0o755) { }
 
     getName (): string {
         return this.name
+    }
+
+    getMode (): number {
+        return this.mode
     }
 
     getChildrens (): (FileUpload|DirectoryUpload)[] {
@@ -370,6 +393,7 @@ export class HTMLFileUpload extends FileUpload {
     // eslint-disable-next-line @typescript-eslint/no-empty-function
     bringToFront (): void { }
 
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    close (): void { }
+    close (): void {
+        void this.reader.cancel()
+    }
 }

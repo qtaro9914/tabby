@@ -10,6 +10,15 @@ import type { ContextMenuElement, ContextMenuItem } from '@vaadin/vaadin-context
 import { MessageBoxModalComponent } from './components/messageBoxModal.component'
 import './styles.scss'
 
+interface BrowserFileWriter {
+    write: (data: Uint8Array) => Promise<void>
+    close: () => Promise<void>
+    abort: () => Promise<void>
+}
+
+interface BrowserFileHandle {
+    createWritable: () => Promise<BrowserFileWriter>
+}
 
 @Injectable()
 export class WebPlatformService extends PlatformService {
@@ -109,7 +118,21 @@ export class WebPlatformService extends PlatformService {
     }
 
     async startDownload (name: string, mode: number, size: number): Promise<FileDownload|null> {
-        const transfer = new HTMLFileDownload(name, mode, size)
+        let writer: BrowserFileWriter | null = null
+        const showSaveFilePicker = (window as any).showSaveFilePicker as ((options: { suggestedName: string }) => Promise<BrowserFileHandle>) | undefined
+        if (showSaveFilePicker) {
+            try {
+                const handle = await showSaveFilePicker.call(window, { suggestedName: name })
+                writer = await handle.createWritable()
+            } catch (error) {
+                if (error instanceof DOMException && error.name === 'AbortError') {
+                    return null
+                }
+                console.warn('Could not open a streaming browser download, falling back to an in-memory download', error)
+            }
+        }
+
+        const transfer = new HTMLFileDownload(name, mode, size, writer)
         this.fileTransferStarted.next(transfer)
         return transfer
     }
@@ -154,11 +177,14 @@ export class WebPlatformService extends PlatformService {
 
 class HTMLFileDownload extends FileDownload {
     private buffers: Uint8Array[] = []
+    private finalization?: Promise<void>
+    private aborted = false
 
     constructor (
         private name: string,
         private mode: number,
         private size: number,
+        private writer: BrowserFileWriter | null,
     ) {
         super()
     }
@@ -176,14 +202,43 @@ class HTMLFileDownload extends FileDownload {
     }
 
     async write (buffer: Uint8Array): Promise<void> {
-        this.buffers.push(Uint8Array.from(buffer))
+        if (this.getState() !== 'running') {
+            throw new Error('Download is no longer writable')
+        }
+        if (this.writer) {
+            await this.writer.write(buffer)
+        } else {
+            this.buffers.push(Uint8Array.from(buffer))
+        }
         this.increaseProgress(buffer.length)
     }
 
     async finalize (): Promise<void> {
+        this.finalization ??= this.commit()
+        await this.finalization
+    }
+
+    close (): void {
+        void this.abortDownload()
+    }
+
+    protected abort (): void {
+        void this.abortDownload()
+    }
+
+    private async commit (): Promise<void> {
         this.setFinalizing()
         try {
-            this.finish()
+            if (this.getCompletedBytes() !== this.size) {
+                throw new Error(`Expected ${this.size} bytes, received ${this.getCompletedBytes()}`)
+            }
+            if (this.writer) {
+                const writer = this.writer
+                this.writer = null
+                await writer.close()
+            } else {
+                this.finish()
+            }
             this.setCompleted(true)
         } catch (error) {
             this.fail(error)
@@ -191,16 +246,27 @@ class HTMLFileDownload extends FileDownload {
         }
     }
 
-    finish () {
+    private finish (): void {
         const blob = new Blob(this.buffers, { type: 'application/octet-stream' })
+        this.buffers = []
         const element = window.document.createElement('a')
-        element.href = window.URL.createObjectURL(blob)
+        const objectURL = window.URL.createObjectURL(blob)
+        element.href = objectURL
         element.download = this.name
         document.body.appendChild(element)
         element.click()
         document.body.removeChild(element)
+        setTimeout(() => window.URL.revokeObjectURL(objectURL), 1000)
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    close (): void { }
+    private async abortDownload (): Promise<void> {
+        if (this.aborted) {
+            return
+        }
+        this.aborted = true
+        this.buffers = []
+        const writer = this.writer
+        this.writer = null
+        await writer?.abort().catch(() => undefined)
+    }
 }

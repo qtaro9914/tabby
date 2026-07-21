@@ -1,7 +1,7 @@
 import { Component, Input, Output, EventEmitter, HostBinding } from '@angular/core'
 import { TranslateService } from '@ngx-translate/core'
 import { ConfigService } from '../services/config.service'
-import { FileDownload, FileTransfer, PlatformService } from '../api/platform'
+import { FileTransfer, PlatformService } from '../api/platform'
 
 /** @hidden */
 @Component({
@@ -23,7 +23,7 @@ export class TransfersMenuComponent {
     ) { }
 
     isDownload (transfer: FileTransfer): boolean {
-        return transfer instanceof FileDownload
+        return transfer.getDirection() === 'download'
     }
 
     getProgress (transfer: FileTransfer): number {

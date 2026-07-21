@@ -66,12 +66,15 @@ export class ElectronPlatformService extends PlatformService {
         const items = await fs.readdir(dir, { withFileTypes: true })
         for (const item of items) {
             if (item.isDirectory()) {
-                root.pushChildren(await this.getAllFiles(path.join(dir, item.name), new DirectoryUpload(item.name)))
+                const childPath = path.join(dir, item.name)
+                const stat = await fs.stat(childPath)
+                root.pushChildren(await this.getAllFiles(childPath, new DirectoryUpload(item.name, stat.mode)))
+            } else if (item.isSymbolicLink()) {
+                throw new Error(`Symbolic link uploads are not supported: ${path.join(dir, item.name)}`)
             } else {
                 const file = new ElectronFileUpload(path.join(dir, item.name), this.electron)
                 root.pushChildren(file)
                 await wrapPromise(this.zone, file.prepare())
-                this.fileTransferStarted.next(file)
             }
         }
         return root
@@ -298,8 +301,11 @@ export class ElectronPlatformService extends PlatformService {
             paths = result.filePaths
         }
 
+        const sourcePath = paths[0].split(path.sep).join(path.posix.sep)
+        const stat = await fs.stat(sourcePath)
         const root = new DirectoryUpload()
-        root.pushChildren(await this.getAllFiles(paths[0].split(path.sep).join(path.posix.sep), new DirectoryUpload(path.basename(paths[0]))))
+        root.pushChildren(await this.getAllFiles(sourcePath, new DirectoryUpload(path.basename(paths[0]), stat.mode)))
+        this.registerDirectoryUploads(root)
         return root
     }
 
@@ -343,6 +349,16 @@ export class ElectronPlatformService extends PlatformService {
 
     _registerFileTransfer (transfer: FileTransfer): void {
         this.fileTransferStarted.next(transfer)
+    }
+
+    private registerDirectoryUploads (directory: DirectoryUpload): void {
+        for (const child of directory.getChildrens()) {
+            if (child instanceof DirectoryUpload) {
+                this.registerDirectoryUploads(child)
+            } else {
+                this.fileTransferStarted.next(child)
+            }
+        }
     }
 
     setErrorHandler (handler: (_: any) => void): void {
@@ -543,6 +559,7 @@ class ElectronFileDownload extends FileDownload {
         }
         await this.file?.sync()
         await this.closeFile()
+        await fs.chmod(this.temporaryPath, this.mode & 0o7777)
 
         if (process.platform !== 'win32') {
             await fs.rename(this.temporaryPath, this.filePath)
@@ -628,6 +645,25 @@ class ElectronDirectoryDownload extends DirectoryDownload {
     async createDirectory (relativePath: string): Promise<void> {
         const fullPath = resolveInsideBase(this.basePath, relativePath)
         await fs.mkdir(fullPath, { recursive: true })
+    }
+
+    async createSymbolicLink (relativePath: string, target: string, targetIsDirectory: boolean): Promise<void> {
+        if (path.posix.isAbsolute(target) || path.win32.isAbsolute(target)) {
+            throw new Error(`Refusing symbolic link with an absolute target: ${relativePath}`)
+        }
+        const fullPath = resolveInsideBase(this.basePath, relativePath)
+        const localTarget = target.split('/').join(path.sep)
+        const resolvedTarget = path.resolve(path.dirname(fullPath), localTarget)
+        const relativeTarget = path.relative(this.basePath, resolvedTarget)
+        if (relativeTarget === '..' || relativeTarget.startsWith('..' + path.sep) || path.isAbsolute(relativeTarget)) {
+            throw new Error(`Refusing symbolic link outside the target directory: ${relativePath}`)
+        }
+        await fs.mkdir(path.dirname(fullPath), { recursive: true })
+        await fs.symlink(localTarget, fullPath, process.platform === 'win32' ? targetIsDirectory ? 'dir' : 'file' : undefined)
+    }
+
+    async setDirectoryMode (relativePath: string, mode: number): Promise<void> {
+        await fs.chmod(resolveInsideBase(this.basePath, relativePath), mode & 0o7777)
     }
 
     async createFile (relativePath: string, mode: number, size: number): Promise<FileDownload> {

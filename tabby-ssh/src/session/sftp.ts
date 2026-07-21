@@ -163,8 +163,19 @@ export class SFTPSession {
             await handle.flush()
             await handle.close()
             handle = null
+            await this.chmod(tempPath, transfer.getMode() & 0o7777).catch(error => {
+                this.logger.warn('Could not preserve SFTP upload permissions', error)
+            })
 
-            const destinationExists = await this.stat(path).then(() => true, () => false)
+            let destinationExists = false
+            try {
+                await this.stat(path)
+                destinationExists = true
+            } catch (error) {
+                if (!this.isNotFoundError(error)) {
+                    throw error
+                }
+            }
             if (destinationExists) {
                 await this.rename(path, backupPath)
             }
@@ -299,5 +310,9 @@ export class SFTPSession {
             size: entry.metadata.size,
             modified: new Date((entry.metadata.mtime ?? 0) * 1000),
         }
+    }
+
+    private isNotFoundError (error: unknown): boolean {
+        return /NoSuchFile|no such file|SSH_FX_NO_SUCH_FILE/i.test(String(error))
     }
 }
