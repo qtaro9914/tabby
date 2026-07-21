@@ -187,20 +187,31 @@ class ZModemMiddleware extends SessionMiddleware {
         try {
             if (zsession.type === 'send') {
                 const transfers = await this.platform.startUpload({ multiple: true })
-                let filesRemaining = transfers.length
-                let sizeRemaining = transfers.reduce((a, b) => a + b.getSize(), 0)
-                for (const transfer of transfers) {
-                    await this.sendFile(zsession, transfer, filesRemaining, sizeRemaining)
-                    filesRemaining--
-                    sizeRemaining -= transfer.getSize()
+                const pendingTransfers = [...transfers]
+                let filesRemaining = pendingTransfers.length
+                let sizeRemaining = pendingTransfers.reduce((a, b) => a + b.getSize(), 0)
+                try {
+                    while (pendingTransfers.length) {
+                        const transfer = pendingTransfers.shift()!
+                        await this.sendFile(zsession, transfer, filesRemaining, sizeRemaining)
+                        filesRemaining--
+                        sizeRemaining -= transfer.getSize()
+                    }
+                } finally {
+                    for (const transfer of pendingTransfers) {
+                        transfer.cancel()
+                    }
                 }
                 await zsession.close()
 
                 this.showMessage(colors.bgBlue.black(' ZMODEM ') + ' Complete')
             } else {
                 const pendingReceives: Promise<void>[] = []
+                const receiveErrors: any[] = []
                 zsession.on('offer', xfer => {
-                    pendingReceives.push(this.receiveFile(xfer, zsession))
+                    pendingReceives.push(this.receiveFile(xfer, zsession).catch(error => {
+                        receiveErrors.push(error)
+                    }))
                 })
 
                 // session_end fires synchronously inside sentry.consume(),
@@ -218,6 +229,9 @@ class ZModemMiddleware extends SessionMiddleware {
 
                 await new Promise(resolve => zsession.on('session_end', resolve))
                 await Promise.all(pendingReceives)
+                if (receiveErrors.length) {
+                    throw receiveErrors[0]
+                }
 
                 this.showMessage(colors.bgBlue.black(' ZMODEM ') + ' Complete')
                 this.flushTrailingBuffer()
@@ -264,6 +278,7 @@ class ZModemMiddleware extends SessionMiddleware {
         })
 
         let writeQueue: Promise<void> = Promise.resolve()
+        let writeError: any = null
         let receivedBytes = 0
         let lastUpdateTime = 0
 
@@ -284,31 +299,49 @@ class ZModemMiddleware extends SessionMiddleware {
                             this.showMessage(colors.bgYellow.black(` ${percentStr}% `) + ' ' + details.name, true)
                         }
 
-                        writeQueue = writeQueue
-                            .then(() => transfer.write(Buffer.from(chunk)))
-                            .catch(err => {
-                                this.logger.error('Zmodem write error', err)
-                            })
+                        writeQueue = writeQueue.then(async () => {
+                            if (writeError) {
+                                return
+                            }
+                            try {
+                                await transfer.write(Buffer.from(chunk))
+                            } catch (error) {
+                                writeError = error
+                                this.logger.error('Zmodem write error', error)
+                                try {
+                                    zsession._skip()
+                                } catch {}
+                            }
+                        })
                     },
                 }),
                 this.cancelEvent.pipe(first()).toPromise(),
             ])
 
             await writeQueue
+            if (writeError) {
+                throw writeError
+            }
 
             // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
             if (canceled) {
                 transfer.cancel()
                 this.showMessage(colors.bgRed.black(' Canceled ') + ' ' + details.name)
             } else {
+                if (receivedBytes !== details.size) {
+                    throw new Error(`Expected ${details.size} bytes, received ${receivedBytes}`)
+                }
                 await transfer.finalize()
                 this.showMessage(colors.bgGreen.black(' Received ') + ' ' + details.name)
             }
-        } catch {
+        } catch (error) {
+            transfer.cancel()
+            this.logger.error('ZMODEM receive error', error)
             this.showMessage(colors.bgRed.black(' Error ') + ' ' + details.name)
+            throw error
+        } finally {
+            cancelSubscription.unsubscribe()
         }
-
-        cancelSubscription.unsubscribe()
     }
 
     private async sendFile (zsession, transfer: FileUpload, filesRemaining, sizeRemaining) {
@@ -322,10 +355,18 @@ class ZModemMiddleware extends SessionMiddleware {
         this.logger.info('offering', offer)
         this.showMessage(colors.bgYellow.black(' Offered ') + ' ' + offer.name, true)
 
-        const xfer = await zsession.send_offer(offer)
-        if (xfer) {
-            let canceled = false
-            const cancelSubscription = this.cancelEvent.subscribe(() => {
+        let canceled = false
+        let transferClosed = false
+        let cancelSubscription: { unsubscribe: () => void } | null = null
+        try {
+            const xfer = await zsession.send_offer(offer)
+            if (!xfer) {
+                this.showMessage(colors.bgRed.black(' Rejected ') + ' ' + offer.name)
+                this.logger.warn('rejected by the other side')
+                return
+            }
+
+            cancelSubscription = this.cancelEvent.subscribe(() => {
                 canceled = true
             })
 
@@ -346,6 +387,7 @@ class ZModemMiddleware extends SessionMiddleware {
             } else {
                 await transfer.finalize()
             }
+            transferClosed = true
 
             await xfer.end()
 
@@ -355,12 +397,11 @@ class ZModemMiddleware extends SessionMiddleware {
             } else {
                 this.showMessage(colors.bgGreen.black(' Sent ') + ' ' + offer.name)
             }
-
-            cancelSubscription.unsubscribe()
-        } else {
-            transfer.cancel()
-            this.showMessage(colors.bgRed.black(' Rejected ') + ' ' + offer.name)
-            this.logger.warn('rejected by the other side')
+        } finally {
+            cancelSubscription?.unsubscribe()
+            if (!transferClosed) {
+                transfer.cancel()
+            }
         }
     }
 
