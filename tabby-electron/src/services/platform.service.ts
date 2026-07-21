@@ -70,7 +70,7 @@ export class ElectronPlatformService extends PlatformService {
             } else {
                 const file = new ElectronFileUpload(path.join(dir, item.name), this.electron)
                 root.pushChildren(file)
-                await wrapPromise(this.zone, file.open())
+                await wrapPromise(this.zone, file.prepare())
                 this.fileTransferStarted.next(file)
             }
         }
@@ -275,7 +275,7 @@ export class ElectronPlatformService extends PlatformService {
 
         return Promise.all(paths.map(async p => {
             const transfer = new ElectronFileUpload(p, this.electron)
-            await wrapPromise(this.zone, transfer.open())
+            await wrapPromise(this.zone, transfer.prepare())
             this.fileTransferStarted.next(transfer)
             return transfer
         }))
@@ -379,26 +379,20 @@ class ElectronFileUpload extends FileUpload {
     private size: number
     private mode: number
     private file?: fs.FileHandle
-    private buffer: Uint8Array
+    private buffer?: Uint8Array
+    private opening?: Promise<void>
+    private closed = false
     private powerSaveBlocker = 0
 
     constructor (private filePath: string, private electron: ElectronService) {
         super()
-        this.buffer = new Uint8Array(256 * 1024)
-        this.powerSaveBlocker = electron.powerSaveBlocker.start('prevent-app-suspension')
     }
 
-    async open (): Promise<void> {
-        try {
-            const stat = await fs.stat(this.filePath)
-            this.size = stat.size
-            this.mode = stat.mode
-            this.setTotalSize(this.size)
-            this.file = await fs.open(this.filePath, 'r')
-        } catch (e) {
-            this.stopPowerSaveBlocker()
-            throw e
-        }
+    async prepare (): Promise<void> {
+        const stat = await fs.stat(this.filePath)
+        this.size = stat.size
+        this.mode = stat.mode
+        this.setTotalSize(this.size)
     }
 
     getName (): string {
@@ -414,9 +408,11 @@ class ElectronFileUpload extends FileUpload {
     }
 
     async read (): Promise<Uint8Array> {
-        const result = await this.file!.read(this.buffer, 0, this.buffer.length, null)
+        await this.ensureOpen()
+        const buffer = this.buffer!
+        const result = await this.file!.read(buffer, 0, buffer.length, null)
         this.increaseProgress(result.bytesRead)
-        return this.buffer.slice(0, result.bytesRead)
+        return buffer.slice(0, result.bytesRead)
     }
 
     close (): void {
@@ -428,12 +424,38 @@ class ElectronFileUpload extends FileUpload {
     }
 
     private async closeFile (): Promise<void> {
+        this.closed = true
+        await this.opening?.catch(() => undefined)
         this.stopPowerSaveBlocker()
         if (this.file) {
             const file = this.file
             this.file = undefined
             await file.close()
         }
+    }
+
+    private async ensureOpen (): Promise<void> {
+        if (this.closed) {
+            throw new Error('Upload was closed')
+        }
+        if (!this.opening) {
+            this.opening = (async () => {
+                this.powerSaveBlocker = this.electron.powerSaveBlocker.start('prevent-app-suspension')
+                try {
+                    const file = await fs.open(this.filePath, 'r')
+                    if (this.closed) {
+                        await file.close()
+                        throw new Error('Upload was closed')
+                    }
+                    this.file = file
+                    this.buffer = new Uint8Array(256 * 1024)
+                } catch (error) {
+                    this.stopPowerSaveBlocker()
+                    throw error
+                }
+            })()
+        }
+        await this.opening
     }
 
     private stopPowerSaveBlocker (): void {

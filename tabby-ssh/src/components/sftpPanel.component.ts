@@ -215,9 +215,16 @@ export class SFTPPanelComponent {
     async upload (): Promise<void> {
         const transfers = await this.platform.startUpload({ multiple: true })
         const savedPath = this.path
-        await this.runWithConcurrency(transfers, 4, transfer =>
-            this.sftp.upload(path.join(savedPath, transfer.getName()), transfer),
-        )
+        try {
+            await this.runWithConcurrency(transfers, 4, transfer =>
+                this.sftp.upload(path.join(savedPath, transfer.getName()), transfer),
+            )
+        } catch (error) {
+            for (const transfer of transfers) {
+                transfer.cancel()
+            }
+            throw error
+        }
         if (this.path === savedPath) {
             await this.navigate(this.path)
         }
@@ -225,7 +232,12 @@ export class SFTPPanelComponent {
 
     async uploadFolder (): Promise<void> {
         const transfer = await this.platform.startUploadDirectory()
-        await this.uploadOneFolder(transfer)
+        try {
+            await this.uploadOneFolder(transfer)
+        } catch (error) {
+            this.cancelDirectoryUpload(transfer)
+            throw error
+        }
     }
 
     async uploadOneFolder (transfer: DirectoryUpload, accumPath = ''): Promise<void> {
@@ -333,13 +345,31 @@ export class SFTPPanelComponent {
 
     private async runWithConcurrency<T> (items: T[], concurrency: number, task: (item: T) => Promise<void>): Promise<void> {
         let nextIndex = 0
+        const errors: unknown[] = []
         const worker = async () => {
-            while (nextIndex < items.length) {
+            while (!errors.length && nextIndex < items.length) {
                 const item = items[nextIndex++]
-                await task(item)
+                try {
+                    await task(item)
+                } catch (error) {
+                    errors.push(error)
+                }
             }
         }
         await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()))
+        if (errors.length) {
+            throw errors[0]
+        }
+    }
+
+    private cancelDirectoryUpload (directory: DirectoryUpload): void {
+        for (const child of directory.getChildrens()) {
+            if (child instanceof DirectoryUpload) {
+                this.cancelDirectoryUpload(child)
+            } else {
+                child.cancel()
+            }
+        }
     }
 
     getModeString (item: SFTPFile): string {
