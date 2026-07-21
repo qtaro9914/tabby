@@ -14,6 +14,17 @@ export class OSCProcessor extends SessionMiddleware {
     private copyRequested = new Subject<string>()
 
     feedFromSession (data: Buffer): void {
+        if (!this.buffer && data.indexOf(OSCPrefix) === -1) {
+            if (data[data.length - 1] === OSCPrefix[0]) {
+                this.buffer = data.subarray(data.length - 1)
+                data = data.subarray(0, data.length - 1)
+            }
+            if (data.length) {
+                super.feedFromSession(data)
+            }
+            return
+        }
+
         // Prepend any buffered data from previous chunks
         if (this.buffer) {
             data = Buffer.concat([this.buffer, data])
@@ -29,7 +40,13 @@ export class OSCProcessor extends SessionMiddleware {
             if (prefixIndex === -1) {
                 // No more OSC sequences, pass remaining data
                 if (startIndex < data.length) {
-                    processedData.push(data.subarray(startIndex))
+                    const endIndex = data[data.length - 1] === OSCPrefix[0] ? data.length - 1 : data.length
+                    if (startIndex < endIndex) {
+                        processedData.push(data.subarray(startIndex, endIndex))
+                    }
+                    if (endIndex < data.length) {
+                        this.buffer = data.subarray(endIndex)
+                    }
                 }
                 break
             }
@@ -88,12 +105,18 @@ export class OSCProcessor extends SessionMiddleware {
         }
 
         // Pass through all processed data
-        if (processedData.length > 0) {
+        if (processedData.length === 1) {
+            super.feedFromSession(processedData[0])
+        } else if (processedData.length > 1) {
             super.feedFromSession(Buffer.concat(processedData))
         }
     }
 
     close (): void {
+        if (this.buffer?.length) {
+            super.feedFromSession(this.buffer)
+            this.buffer = null
+        }
         this.cwdReported.complete()
         this.copyRequested.complete()
         super.close()

@@ -85,6 +85,9 @@ export class XTermFrontend extends Frontend {
     private canvasAddon?: CanvasAddon
     private opened = false
     private resizeObserver?: any
+    private resizeTimeout?: ReturnType<typeof setTimeout>
+    private resizeAnimationFrame?: number
+    private cancelPendingResize?: () => void
     private flowControl: FlowControl
     private pinnedToBottom = true
     private pendingRendererRecovery = false
@@ -258,6 +261,7 @@ export class XTermFrontend extends Frontend {
         let resizePending = false
         let lastResize = 0
         const runResize = () => {
+            this.resizeAnimationFrame = undefined
             resizePending = false
             lastResize = Date.now()
             doResize()
@@ -269,10 +273,24 @@ export class XTermFrontend extends Frontend {
             resizePending = true
             const wait = Math.max(0, RESIZE_MIN_INTERVAL - (Date.now() - lastResize))
             if (wait > 0) {
-                setTimeout(() => requestAnimationFrame(runResize), wait)
+                this.resizeTimeout = setTimeout(() => {
+                    this.resizeTimeout = undefined
+                    this.resizeAnimationFrame = requestAnimationFrame(runResize)
+                }, wait)
             } else {
-                requestAnimationFrame(runResize)
+                this.resizeAnimationFrame = requestAnimationFrame(runResize)
             }
+        }
+        this.cancelPendingResize = () => {
+            if (this.resizeTimeout) {
+                clearTimeout(this.resizeTimeout)
+                this.resizeTimeout = undefined
+            }
+            if (this.resizeAnimationFrame !== undefined) {
+                cancelAnimationFrame(this.resizeAnimationFrame)
+                this.resizeAnimationFrame = undefined
+            }
+            resizePending = false
         }
 
         const oldKeyUp = this.xtermCore._keyUp.bind(this.xtermCore)
@@ -312,20 +330,15 @@ export class XTermFrontend extends Frontend {
 
         if (this.enableWebGL) {
             this.attachWebGLAddon()
-            this.platformService.displayMetricsChanged$.pipe(
-                takeUntil(this.destroyed$),
-            ).subscribe(() => {
-                this.webGLAddon?.clearTextureAtlas()
-            })
         } else {
-            this.canvasAddon = new CanvasAddon()
-            this.xterm.loadAddon(this.canvasAddon)
-            this.platformService.displayMetricsChanged$.pipe(
-                takeUntil(this.destroyed$),
-            ).subscribe(() => {
-                this.canvasAddon?.clearTextureAtlas()
-            })
+            this.attachCanvasAddon()
         }
+        this.platformService.displayMetricsChanged$.pipe(
+            takeUntil(this.destroyed$),
+        ).subscribe(() => {
+            this.webGLAddon?.clearTextureAtlas()
+            this.canvasAddon?.clearTextureAtlas()
+        })
 
         // Allow an animation frame
         await new Promise(r => setTimeout(r, 100))
@@ -417,6 +430,7 @@ export class XTermFrontend extends Frontend {
         window.removeEventListener('resize', this.resizeHandler)
         this.resizeObserver?.disconnect()
         delete this.resizeObserver
+        this.cancelPendingResize?.()
     }
 
     destroy (): void {
@@ -694,7 +708,7 @@ export class XTermFrontend extends Frontend {
         // unset. Treat a WebGL frontend that has lost its addon as needing
         // recovery too, so a shown-but-blank pane always gets its context back
         // instead of relying on a manual window resize.
-        if (this.pendingRendererRecovery || this.enableWebGL && !this.webGLAddon) {
+        if (this.pendingRendererRecovery || this.enableWebGL && !this.webGLAddon && !this.canvasAddon) {
             this.pendingRendererRecovery = true
             this.recoverRenderer()
         } else {
@@ -706,13 +720,32 @@ export class XTermFrontend extends Frontend {
         }
     }
 
-    private attachWebGLAddon (): void {
-        const addon = new WebglAddon()
-        // xterm fires this when the GPU drops the canvas context (driver reset,
-        // backgrounded app, too many live contexts).
-        addon.onContextLoss(() => this.onWebGLContextLoss())
-        this.xterm.loadAddon(addon)
-        this.webGLAddon = addon
+    private attachWebGLAddon (): boolean {
+        let addon: WebglAddon|undefined = undefined
+        try {
+            addon = new WebglAddon()
+            // xterm fires this when the GPU drops the canvas context (driver reset,
+            // backgrounded app, too many live contexts).
+            addon.onContextLoss(() => this.onWebGLContextLoss())
+            this.xterm.loadAddon(addon)
+            this.canvasAddon?.dispose()
+            this.canvasAddon = undefined
+            this.webGLAddon = addon
+            return true
+        } catch (e) {
+            addon?.dispose()
+            console.warn('Could not initialize xterm WebGL renderer', e)
+            this.attachCanvasAddon()
+            return false
+        }
+    }
+
+    private attachCanvasAddon (): void {
+        if (this.canvasAddon) {
+            return
+        }
+        this.canvasAddon = new CanvasAddon()
+        this.xterm.loadAddon(this.canvasAddon)
     }
 
     private onWebGLContextLoss (): void {
@@ -734,9 +767,12 @@ export class XTermFrontend extends Frontend {
         this.pendingRendererRecovery = false
         if (this.rendererRecoveryAttempts < MAX_WEBGL_RECOVERY_ATTEMPTS) {
             this.rendererRecoveryAttempts++
-            this.attachWebGLAddon()
+            if (!this.attachWebGLAddon()) {
+                this.rendererRecoveryAttempts = MAX_WEBGL_RECOVERY_ATTEMPTS
+            }
+        } else {
+            this.attachCanvasAddon()
         }
-        // Once the retry budget is exhausted xterm falls back to its DOM renderer.
         this.redraw()
     }
 

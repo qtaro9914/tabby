@@ -18,7 +18,7 @@ export abstract class BaseSession {
     protected destroyed = new Subject<void>()
     protected loginScriptProcessor: LoginScriptProcessor | null = null
     protected reportedCWD?: string
-    private initialDataBuffer = Buffer.from('')
+    private initialDataChunks: Buffer[] = []
     private initialDataBufferReleased = false
 
     get output$ (): Observable<string> { return this.output }
@@ -34,7 +34,7 @@ export abstract class BaseSession {
 
         this.middleware.outputToTerminal$.subscribe(data => {
             if (!this.initialDataBufferReleased) {
-                this.initialDataBuffer = Buffer.concat([this.initialDataBuffer, data])
+                this.initialDataChunks.push(data)
             } else {
                 this.output.next(data.toString())
                 this.binaryOutput.next(data)
@@ -54,9 +54,10 @@ export abstract class BaseSession {
 
     releaseInitialDataBuffer (): void {
         this.initialDataBufferReleased = true
-        this.output.next(this.initialDataBuffer.toString())
-        this.binaryOutput.next(this.initialDataBuffer)
-        this.initialDataBuffer = Buffer.from('')
+        const initialData = Buffer.concat(this.initialDataChunks)
+        this.initialDataChunks = []
+        this.output.next(initialData.toString())
+        this.binaryOutput.next(initialData)
     }
 
     setLoginScriptsOptions (options: LoginScriptsOptions): void {

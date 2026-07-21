@@ -4,7 +4,7 @@
 //  C) B but fed Uint8Array instead of string (decode-cost delta)
 // Requires a prior profiler.mjs-style setup (window.__perf) or sets one up.
 import { statSync } from 'fs'
-import { CDP, findRendererTarget, sleep } from '/home/morikyu/work/fork_repo/tabby/scripts/perf/cdp.mjs'
+import { CDP, findRendererTarget, sleep } from './cdp.mjs'
 
 const LOG_FILE = process.env.PERF_LOG_FILE
 const LOG_SIZE = statSync(LOG_FILE).size

@@ -495,9 +495,12 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
      * Feeds input into the terminal frontend
      */
     async write (data: string): Promise<void> {
-        this.frontendWriteLock = this.frontendWriteLock.then(() =>
+        const write = this.frontendWriteLock.then(() =>
             this.withSpinnerPaused(() => this.writeRaw(data)))
-        await this.frontendWriteLock
+        this.frontendWriteLock = write.catch(e => {
+            this.logger.warn('Terminal frontend write failed', e)
+        })
+        await write
     }
 
     protected async writeRaw (data: string): Promise<void> {
