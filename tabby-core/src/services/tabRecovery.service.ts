@@ -10,6 +10,8 @@ import { NewTabParameters } from './tabs.service'
 export class TabRecoveryService {
     logger: Logger
     enabled = false
+    private saveInProgress: Promise<void>|null = null
+    private pendingTabs: BaseTabComponent[]|null = null
 
     private constructor (
         @Inject(TabRecoveryProvider) private tabRecoveryProviders: TabRecoveryProvider<BaseTabComponent>[]|null,
@@ -23,11 +25,33 @@ export class TabRecoveryService {
         if (!this.enabled || !this.config.store.recoverTabs) {
             return
         }
-        window.localStorage.tabsRecovery = JSON.stringify(
-            (await Promise.all(
-                tabs.map(async tab => this.getFullRecoveryToken(tab, { includeState: true })),
-            )).filter(token => !!token),
-        )
+        this.pendingTabs = [...tabs]
+        if (!this.saveInProgress) {
+            this.saveInProgress = this.savePendingTabs().finally(() => {
+                this.saveInProgress = null
+            })
+        }
+        await this.saveInProgress
+    }
+
+    private async savePendingTabs (): Promise<void> {
+        while (this.pendingTabs) {
+            const tabs = this.pendingTabs
+            this.pendingTabs = null
+            await this.saveTabsNow(tabs)
+        }
+    }
+
+    private async saveTabsNow (tabs: BaseTabComponent[]): Promise<void> {
+        try {
+            window.localStorage.tabsRecovery = JSON.stringify(
+                (await Promise.all(
+                    tabs.map(async tab => this.getFullRecoveryToken(tab, { includeState: true })),
+                )).filter(token => !!token),
+            )
+        } catch (error) {
+            this.logger.warn('Could not save tab recovery state', error)
+        }
     }
 
     async getFullRecoveryToken (tab: BaseTabComponent, options?: GetRecoveryTokenOptions): Promise<RecoveryToken|null> {

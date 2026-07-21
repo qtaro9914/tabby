@@ -61,6 +61,7 @@ export class AppService {
     private tabDragActive = new Subject<BaseTabComponent|null>()
     private ready = new AsyncSubject<void>()
     private recoveryStateChangedHint = new Subject<void>()
+    private recoverySaveIdleCallback: number|null = null
 
     private completionObservers = new Map<BaseTabComponent, CompletionObserver>()
 
@@ -94,10 +95,16 @@ export class AppService {
         }, 30000)
 
         this.recoveryStateChangedHint.pipe(debounceTime(1000)).subscribe(() => {
+            if (this.recoverySaveIdleCallback !== null) {
+                return
+            }
             // Serializing every tab's scrollback is expensive — defer it to an
             // idle period so it doesn't add jank while output is streaming
-            window.requestIdleCallback(
-                () => this.tabRecovery.saveTabs(this.tabs),
+            this.recoverySaveIdleCallback = window.requestIdleCallback(
+                () => {
+                    this.recoverySaveIdleCallback = null
+                    void this.tabRecovery.saveTabs(this.tabs)
+                },
                 { timeout: 5000 },
             )
         })
@@ -477,8 +484,12 @@ export class AppService {
     }
 
     async closeWindow (): Promise<void> {
-        this.tabRecovery.enabled = false
+        if (this.recoverySaveIdleCallback !== null) {
+            window.cancelIdleCallback(this.recoverySaveIdleCallback)
+            this.recoverySaveIdleCallback = null
+        }
         await this.tabRecovery.saveTabs(this.tabs)
+        this.tabRecovery.enabled = false
         if (await this.closeAllTabs()) {
             this.hostWindow.close()
         } else {
