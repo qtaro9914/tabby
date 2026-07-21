@@ -416,9 +416,6 @@ class ElectronFileUpload extends FileUpload {
     async read (): Promise<Uint8Array> {
         const result = await this.file!.read(this.buffer, 0, this.buffer.length, null)
         this.increaseProgress(result.bytesRead)
-        if (this.getCompletedBytes() >= this.getSize()) {
-            this.setCompleted(true)
-        }
         return this.buffer.slice(0, result.bytesRead)
     }
 
@@ -494,9 +491,6 @@ class ElectronFileDownload extends FileDownload {
             this.increaseProgress(result.bytesWritten)
             pos += result.bytesWritten
         }
-        if (this.getCompletedBytes() >= this.getSize()) {
-            this.setCompleted(true)
-        }
     }
 
     close (): void {
@@ -504,7 +498,15 @@ class ElectronFileDownload extends FileDownload {
     }
 
     async finalize (): Promise<void> {
-        this.finalization ??= this.commit()
+        if (!this.finalization) {
+            this.setFinalizing()
+            this.finalization = this.commit().then(() => {
+                this.setCompleted(true)
+            }).catch(error => {
+                this.fail(error)
+                throw error
+            })
+        }
         await this.finalization
     }
 
@@ -616,6 +618,9 @@ class ElectronDirectoryDownload extends DirectoryDownload {
     }
 
     close (): void {
-        this.electron.powerSaveBlocker.stop(this.powerSaveBlocker)
+        if (this.powerSaveBlocker) {
+            this.electron.powerSaveBlocker.stop(this.powerSaveBlocker)
+            this.powerSaveBlocker = 0
+        }
     }
 }

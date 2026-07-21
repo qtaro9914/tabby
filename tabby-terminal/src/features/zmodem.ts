@@ -328,14 +328,16 @@ class ZModemMiddleware extends SessionMiddleware {
                 transfer.cancel()
                 this.showMessage(colors.bgRed.black(' Canceled ') + ' ' + details.name)
             } else {
+                transfer.setFinalizing()
                 if (receivedBytes !== details.size) {
                     throw new Error(`Expected ${details.size} bytes, received ${receivedBytes}`)
                 }
                 await transfer.finalize()
+                transfer.setCompleted(true)
                 this.showMessage(colors.bgGreen.black(' Received ') + ' ' + details.name)
             }
         } catch (error) {
-            transfer.cancel()
+            transfer.fail(error)
             this.logger.error('ZMODEM receive error', error)
             this.showMessage(colors.bgRed.black(' Error ') + ' ' + details.name)
             throw error
@@ -385,11 +387,13 @@ class ZModemMiddleware extends SessionMiddleware {
             if (canceled) {
                 transfer.cancel()
             } else {
+                transfer.setFinalizing()
                 await transfer.finalize()
             }
             transferClosed = true
 
             await xfer.end()
+            transfer.setCompleted(true)
 
             // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
             if (canceled) {
@@ -397,6 +401,9 @@ class ZModemMiddleware extends SessionMiddleware {
             } else {
                 this.showMessage(colors.bgGreen.black(' Sent ') + ' ' + offer.name)
             }
+        } catch (error) {
+            transfer.fail(error)
+            throw error
         } finally {
             cancelSubscription?.unsubscribe()
             if (!transferClosed) {

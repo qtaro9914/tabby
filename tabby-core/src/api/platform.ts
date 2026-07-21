@@ -20,6 +20,8 @@ export interface MessageBoxResult {
     response: number
 }
 
+export type FileTransferState = 'running'|'finalizing'|'succeeded'|'failed'|'cancelled'
+
 export abstract class FileTransfer {
     abstract getName (): string
     abstract getSize (): number
@@ -41,21 +43,52 @@ export abstract class FileTransfer {
         return this.status
     }
 
+    getState (): FileTransferState {
+        return this.state
+    }
+
+    getError (): string {
+        return this.error
+    }
+
     getTotalSize (): number {
         return this.totalSize
     }
 
     isComplete (): boolean {
-        return this.completed || this.completedBytes >= this.getSize()
+        return this.state === 'succeeded'
     }
 
     isCancelled (): boolean {
-        return this.cancelled
+        return this.state === 'cancelled'
+    }
+
+    isFailed (): boolean {
+        return this.state === 'failed'
+    }
+
+    isFinished (): boolean {
+        return this.isComplete() || this.isCancelled() || this.isFailed()
+    }
+
+    isCancellable (): boolean {
+        return this.state === 'running'
     }
 
     cancel (): void {
-        this.cancelled = true
-        this.completed = false
+        if (!this.isCancellable()) {
+            return
+        }
+        this.state = 'cancelled'
+        this.abort()
+    }
+
+    fail (error: unknown): void {
+        if (this.isFinished()) {
+            return
+        }
+        this.error = error instanceof Error ? error.message : String(error)
+        this.state = 'failed'
         this.abort()
     }
 
@@ -68,7 +101,16 @@ export abstract class FileTransfer {
     }
 
     setCompleted (completed: boolean): void {
-        this.completed = completed
+        this.state = completed ? 'succeeded' : 'running'
+        if (completed) {
+            this.lastChunkSpeed = 0
+        }
+    }
+
+    setFinalizing (): void {
+        if (!this.isFinished()) {
+            this.state = 'finalizing'
+        }
     }
 
     protected increaseProgress (bytes: number): void {
@@ -93,8 +135,8 @@ export abstract class FileTransfer {
     private totalSize = 0
     private speedSamples = [{ time: Date.now(), bytes: 0 }]
     private lastChunkSpeed = 0
-    private cancelled = false
-    protected completed = false
+    private state: FileTransferState = 'running'
+    private error = ''
     private status = ''
 }
 
@@ -111,7 +153,7 @@ export abstract class DirectoryDownload extends FileTransfer {
     }
 
     isComplete (): boolean {
-        return this.completed
+        return super.isComplete()
     }
 }
 

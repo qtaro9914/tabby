@@ -178,8 +178,16 @@ class HTMLFileDownload extends FileDownload {
     async write (buffer: Uint8Array): Promise<void> {
         this.buffers.push(Uint8Array.from(buffer))
         this.increaseProgress(buffer.length)
-        if (this.isComplete()) {
+    }
+
+    async finalize (): Promise<void> {
+        this.setFinalizing()
+        try {
             this.finish()
+            this.setCompleted(true)
+        } catch (error) {
+            this.fail(error)
+            throw error
         }
     }
 

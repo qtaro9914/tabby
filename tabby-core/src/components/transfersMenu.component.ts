@@ -42,7 +42,10 @@ export class TransfersMenuComponent {
     }
 
     removeTransfer (transfer: FileTransfer): void {
-        if (!transfer.isComplete()) {
+        if (!transfer.isFinished()) {
+            if (!transfer.isCancellable()) {
+                return
+            }
             transfer.cancel()
         }
         this.transfers = this.transfers.filter(x => x !== transfer)
@@ -50,7 +53,7 @@ export class TransfersMenuComponent {
     }
 
     async removeAll (): Promise<void> {
-        if (this.transfers.some(x => !x.isComplete())) {
+        if (this.transfers.some(x => !x.isFinished())) {
             if ((await this.platform.showMessageBox({
                 type: 'warning',
                 message: this.translate.instant('There are active file transfers'),

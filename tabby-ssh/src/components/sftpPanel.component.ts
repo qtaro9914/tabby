@@ -295,12 +295,16 @@ export class SFTPPanelComponent {
                     }
                 }
                 transfer.setStatus('')
+                transfer.setFinalizing()
+                transfer.close()
                 transfer.setCompleted(true)
             } catch (error) {
-                transfer.cancel()
+                transfer.fail(error)
                 throw error
             } finally {
-                transfer.close()
+                if (!transfer.isComplete()) {
+                    transfer.close()
+                }
             }
         } catch (error) {
             this.notifications.error(`Failed to download folder: ${error.message}`)

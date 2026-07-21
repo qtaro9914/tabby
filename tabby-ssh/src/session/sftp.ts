@@ -158,7 +158,7 @@ export class SFTPSession {
                 await handle.write(chunk)
                 chunk = await nextChunk
             }
-            transfer.setCompleted(true)
+            transfer.setFinalizing()
             await transfer.finalize()
             await handle.flush()
             await handle.close()
@@ -182,8 +182,9 @@ export class SFTPSession {
                     this.logger.warn('Could not remove SFTP upload backup', e)
                 })
             }
+            transfer.setCompleted(true)
         } catch (e) {
-            transfer.cancel()
+            transfer.fail(e)
             throw e
         } finally {
             try {
@@ -216,10 +217,11 @@ export class SFTPSession {
                     chunk = await nextChunk
                 }
             }
-            transfer.setCompleted(true)
+            transfer.setFinalizing()
             await transfer.finalize()
+            transfer.setCompleted(true)
         } catch (e) {
-            transfer.cancel()
+            transfer.fail(e)
             throw e
         } finally {
             try {
