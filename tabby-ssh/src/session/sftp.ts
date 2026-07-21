@@ -160,8 +160,9 @@ export class SFTPSession {
 
     async download (path: string, transfer: FileDownload): Promise<void> {
         this.logger.info('Downloading', path)
+        let handle: SFTPFileHandle|null = null
         try {
-            const handle = await this.open(path, russh.OPEN_READ)
+            handle = await this.open(path, russh.OPEN_READ)
             if (handle.supportsReadAt) {
                 await this.downloadWithReadAhead(handle, transfer)
             } else {
@@ -177,10 +178,15 @@ export class SFTPSession {
                 }
             }
             transfer.close()
-            handle.close()
         } catch (e) {
             transfer.cancel()
             throw e
+        } finally {
+            try {
+                await handle?.close()
+            } catch (e) {
+                this.logger.warn('Could not close SFTP download handle', e)
+            }
         }
     }
 
@@ -190,7 +196,13 @@ export class SFTPSession {
     // loopback, more on high-latency links.
     private async downloadWithReadAhead (handle: SFTPFileHandle, transfer: FileDownload): Promise<void> {
         const DEPTH = 8
-        const chunkSize = await handle.readLimit() ?? 128 * 1024
+        const DEFAULT_CHUNK_SIZE = 128 * 1024
+        // Bound the eight in-flight reads to 8 MiB even if the server advertises more.
+        const MAX_CHUNK_SIZE = 1024 * 1024
+        const readLimit = await handle.readLimit()
+        const chunkSize = readLimit !== null && Number.isSafeInteger(readLimit) && readLimit > 0
+            ? Math.min(readLimit, MAX_CHUNK_SIZE)
+            : DEFAULT_CHUNK_SIZE
 
         // One protocol READ per call; servers may return short reads, so
         // extend at the adjusted offset until the slot is full or EOF
@@ -218,16 +230,20 @@ export class SFTPSession {
         for (let i = 0; i < DEPTH; i++) {
             enqueue()
         }
-        while (queue.length) {
-            const buf = await queue.shift()!
-            if (!buf.length) {
-                eof = true
-                continue
+        try {
+            while (queue.length) {
+                const buf = await queue.shift()!
+                if (!buf.length) {
+                    eof = true
+                    continue
+                }
+                if (!eof) {
+                    enqueue()
+                }
+                await transfer.write(buf)
             }
-            if (!eof) {
-                enqueue()
-            }
-            await transfer.write(buf)
+        } finally {
+            await Promise.allSettled(queue)
         }
     }
 
