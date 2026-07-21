@@ -28,9 +28,9 @@ export class DemoTerminalTabComponent extends BaseTerminalTabComponent<DemoProfi
         super.ngOnInit()
     }
 
-    protected onFrontendReady (): void {
+    protected async onFrontendReady (): Promise<void> {
         this.initializeSession()
-        super.onFrontendReady()
+        await super.onFrontendReady()
     }
 
     initializeSession (): void {

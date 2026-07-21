@@ -48,10 +48,10 @@ export class TerminalTabComponent extends BaseTerminalTabComponent<LocalProfile>
         super.ngOnInit()
     }
 
-    protected onFrontendReady (): void {
+    protected async onFrontendReady (): Promise<void> {
         this.initializeSession(this.size.columns, this.size.rows)
         this.savedStateIsLive = this.profile.options.restoreFromPTYID === this.session?.getID()
-        super.onFrontendReady()
+        await super.onFrontendReady()
     }
 
     initializeSession (columns: number, rows: number): void {

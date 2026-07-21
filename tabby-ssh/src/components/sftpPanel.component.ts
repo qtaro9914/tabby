@@ -1,7 +1,7 @@
 import * as C from 'constants'
 import { posix as path } from 'path'
 import { Component, Input, Output, EventEmitter, Inject, Optional } from '@angular/core'
-import { FileUpload, DirectoryUpload, MenuItemOptions, NotificationsService, PlatformService } from 'tabby-core'
+import { FileUpload, DirectoryUpload, DirectoryDownload, MenuItemOptions, NotificationsService, PlatformService } from 'tabby-core'
 import { SFTPSession, SFTPFile } from '../session/sftp'
 import { SSHSession } from '../session/ssh'
 import { SFTPContextMenuItemProvider } from '../api'
@@ -11,11 +11,6 @@ import { SFTPCreateDirectoryModalComponent } from './sftpCreateDirectoryModal.co
 interface PathSegment {
     name: string
     path: string
-}
-
-interface DownloadManifestEntry {
-    file: SFTPFile
-    relativePath: string
 }
 
 @Component({
@@ -288,24 +283,9 @@ export class SFTPPanelComponent {
             }
 
             try {
-                transfer.setStatus('Scanning')
-                const manifest: DownloadManifestEntry[] = []
-                const totalSize = await this.buildDownloadManifest(folder, '', manifest)
+                transfer.setStatus('Downloading')
+                const totalSize = await this.downloadFolderContents(folder, '', transfer)
                 transfer.setTotalSize(totalSize)
-
-                for (const entry of manifest) {
-                    if (transfer.isCancelled()) {
-                        throw new Error('Download cancelled')
-                    }
-                    transfer.setStatus(entry.relativePath)
-                    if (entry.file.isDirectory) {
-                        await transfer.createDirectory(entry.relativePath)
-                    } else {
-                        const fileDownload = await transfer.createFile(entry.relativePath, entry.file.mode, entry.file.size)
-                        await this.sftp.download(entry.file.fullPath, fileDownload)
-                        transfer.reportFileCompleted(entry.file.size)
-                    }
-                }
                 transfer.setStatus('')
                 transfer.setFinalizing()
                 transfer.close()
@@ -324,19 +304,26 @@ export class SFTPPanelComponent {
         }
     }
 
-    private async buildDownloadManifest (
+    private async downloadFolderContents (
         folder: SFTPFile,
         relativePath: string,
-        manifest: DownloadManifestEntry[],
+        transfer: DirectoryDownload,
     ): Promise<number> {
         let totalSize = 0
         const items = await this.sftp.readdir(folder.fullPath)
         for (const item of items) {
+            if (transfer.isCancelled()) {
+                throw new Error('Download cancelled')
+            }
             const itemRelativePath = relativePath ? `${relativePath}/${item.name}` : item.name
-            manifest.push({ file: item, relativePath: itemRelativePath })
+            transfer.setStatus(itemRelativePath)
             if (item.isDirectory) {
-                totalSize += await this.buildDownloadManifest(item, itemRelativePath, manifest)
+                await transfer.createDirectory(itemRelativePath)
+                totalSize += await this.downloadFolderContents(item, itemRelativePath, transfer)
             } else {
+                const fileDownload = await transfer.createFile(itemRelativePath, item.mode, item.size)
+                await this.sftp.download(item.fullPath, fileDownload)
+                transfer.reportFileCompleted(item.size)
                 totalSize += item.size
             }
         }

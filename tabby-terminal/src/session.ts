@@ -4,6 +4,8 @@ import { LoginScriptProcessor, LoginScriptsOptions } from './middleware/loginScr
 import { OSCProcessor } from './middleware/oscProcessing'
 import { SessionMiddlewareStack } from './api/middleware'
 
+const MAX_INITIAL_DATA_BYTES = 8 * 1024 * 1024
+
 /**
  * A session object for a [[BaseTerminalTabComponent]]
  * Extend this to implement custom I/O and process management for your terminal tab
@@ -19,7 +21,9 @@ export abstract class BaseSession {
     protected loginScriptProcessor: LoginScriptProcessor | null = null
     protected reportedCWD?: string
     private initialDataChunks: Buffer[] = []
+    private initialDataBytes = 0
     private initialDataBufferReleased = false
+    private initialDataTruncated = false
 
     get output$ (): Observable<string> { return this.output }
     get binaryOutput$ (): Observable<Buffer> { return this.binaryOutput }
@@ -35,6 +39,8 @@ export abstract class BaseSession {
         this.middleware.outputToTerminal$.subscribe(data => {
             if (!this.initialDataBufferReleased) {
                 this.initialDataChunks.push(data)
+                this.initialDataBytes += data.length
+                this.trimInitialDataBuffer()
             } else {
                 this.output.next(data.toString())
                 this.binaryOutput.next(data)
@@ -53,11 +59,17 @@ export abstract class BaseSession {
     }
 
     releaseInitialDataBuffer (): void {
+        if (this.initialDataBufferReleased) {
+            return
+        }
         this.initialDataBufferReleased = true
-        const initialData = Buffer.concat(this.initialDataChunks)
+        const initialData = Buffer.concat(this.initialDataChunks, this.initialDataBytes)
         this.initialDataChunks = []
-        this.output.next(initialData.toString())
-        this.binaryOutput.next(initialData)
+        this.initialDataBytes = 0
+        if (initialData.length) {
+            this.output.next(initialData.toString())
+            this.binaryOutput.next(initialData)
+        }
     }
 
     setLoginScriptsOptions (options: LoginScriptsOptions): void {
@@ -68,6 +80,29 @@ export abstract class BaseSession {
             this.middleware.push(newProcessor)
         }
         this.loginScriptProcessor = newProcessor
+    }
+
+    private trimInitialDataBuffer (): void {
+        let excess = this.initialDataBytes - MAX_INITIAL_DATA_BYTES
+        if (excess <= 0) {
+            return
+        }
+        if (!this.initialDataTruncated) {
+            this.initialDataTruncated = true
+            this.logger.warn(`Discarding terminal output buffered before frontend attachment after ${MAX_INITIAL_DATA_BYTES} bytes`)
+        }
+        while (excess > 0 && this.initialDataChunks.length) {
+            const chunk = this.initialDataChunks[0]
+            if (chunk.length <= excess) {
+                this.initialDataChunks.shift()
+                this.initialDataBytes -= chunk.length
+                excess -= chunk.length
+            } else {
+                this.initialDataChunks[0] = Buffer.from(chunk.subarray(excess))
+                this.initialDataBytes -= excess
+                excess = 0
+            }
+        }
     }
 
     async destroy (): Promise<void> {

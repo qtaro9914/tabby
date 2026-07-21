@@ -45,11 +45,11 @@ export abstract class ConnectableTerminalTabComponent<P extends ConnectableTermi
         super.ngOnInit()
     }
 
-    protected onFrontendReady (): void {
-        this.initializeSession().then(() => {
+    protected async onFrontendReady (): Promise<void> {
+        const initialization = this.initializeSession().then(() => {
             this.clearServiceMessagesOnConnect()
         })
-        super.onFrontendReady()
+        await Promise.all([super.onFrontendReady(), initialization])
     }
 
     /**

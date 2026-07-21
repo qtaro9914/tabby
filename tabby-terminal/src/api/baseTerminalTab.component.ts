@@ -374,30 +374,9 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         }[this.config.store.terminal.frontend] ?? XTermFrontend
         this.frontend = new cls(this.injector)
 
-        this.frontendReady$.pipe(first()).subscribe(() => {
-            this.onFrontendReady()
-        })
-
-        this.frontend.resize$.pipe(first()).subscribe(async ({ columns, rows }) => {
-            this.size = { columns, rows }
-            this.frontendReady.next()
-            this.frontendReady.complete()
-
-            this.config.enabledServices(this.decorators).forEach(decorator => {
-                try {
-                    decorator.attach(this)
-                } catch (e) {
-                    this.logger.warn('Decorator attach() throws', e)
-                }
-            })
-
-            setTimeout(() => {
-                this.session?.resize(columns, rows)
-            }, 1000)
-
-            this.session?.releaseInitialDataBuffer()
-            this.sessionChanged$.subscribe(() => {
-                this.session?.releaseInitialDataBuffer()
+        this.frontend.resize$.pipe(first()).subscribe(({ columns, rows }) => {
+            void this.initializeFrontend(columns, rows).catch(error => {
+                this.logger.error('Terminal frontend initialization failed', error)
             })
         })
 
@@ -451,14 +430,42 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
             })
     }
 
-    protected onFrontendReady (): void {
+    private async initializeFrontend (columns: number, rows: number): Promise<void> {
+        this.size = { columns, rows }
+        try {
+            await this.onFrontendReady()
+        } catch (error) {
+            this.logger.warn('Could not restore terminal frontend state', error)
+        }
+        this.frontendReady.next()
+        this.frontendReady.complete()
+
+        this.config.enabledServices(this.decorators).forEach(decorator => {
+            try {
+                decorator.attach(this)
+            } catch (e) {
+                this.logger.warn('Decorator attach() throws', e)
+            }
+        })
+
+        setTimeout(() => {
+            this.session?.resize(columns, rows)
+        }, 1000)
+
+        this.session?.releaseInitialDataBuffer()
+        this.sessionChanged$.subscribe(() => {
+            this.session?.releaseInitialDataBuffer()
+        })
+    }
+
+    protected async onFrontendReady (): Promise<void> {
         this.frontendIsReady = true
         if (this.savedState) {
             this.frontend!.restoreState(this.savedState)
             if (!this.savedStateIsLive) {
-                this.frontend!.write('\r\n\r\n')
-                this.frontend!.write(colors.bgWhite.black(' * ') + colors.bgBlackBright.white(' History restored '))
-                this.frontend!.write('\r\n\r\n')
+                await this.write('\r\n\r\n')
+                await this.write(colors.bgWhite.black(' * ') + colors.bgBlackBright.white(' History restored '))
+                await this.write('\r\n\r\n')
             }
         }
 
@@ -806,7 +813,7 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         this.attachSessionHandler(this.session.output$, data => {
             if (this.enablePassthrough) {
                 this.output.next(data)
-                this.write(data)
+                void this.write(data).catch(() => undefined)
             }
         })
 
