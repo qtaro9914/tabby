@@ -2,6 +2,7 @@ import * as path from 'path'
 import * as fs from 'fs/promises'
 import * as fsSync from 'fs'
 import * as os from 'os'
+import { randomUUID } from 'crypto'
 import promiseIpc, { RendererProcessType } from 'electron-promise-ipc'
 import { execFile } from 'mz/child_process'
 import { Injectable, NgZone } from '@angular/core'
@@ -377,7 +378,7 @@ export class ElectronPlatformService extends PlatformService {
 class ElectronFileUpload extends FileUpload {
     private size: number
     private mode: number
-    private file: fs.FileHandle
+    private file?: fs.FileHandle
     private buffer: Uint8Array
     private powerSaveBlocker = 0
 
@@ -388,11 +389,16 @@ class ElectronFileUpload extends FileUpload {
     }
 
     async open (): Promise<void> {
-        const stat = await fs.stat(this.filePath)
-        this.size = stat.size
-        this.mode = stat.mode
-        this.setTotalSize(this.size)
-        this.file = await fs.open(this.filePath, 'r')
+        try {
+            const stat = await fs.stat(this.filePath)
+            this.size = stat.size
+            this.mode = stat.mode
+            this.setTotalSize(this.size)
+            this.file = await fs.open(this.filePath, 'r')
+        } catch (e) {
+            this.stopPowerSaveBlocker()
+            throw e
+        }
     }
 
     getName (): string {
@@ -408,7 +414,7 @@ class ElectronFileUpload extends FileUpload {
     }
 
     async read (): Promise<Uint8Array> {
-        const result = await this.file.read(this.buffer, 0, this.buffer.length, null)
+        const result = await this.file!.read(this.buffer, 0, this.buffer.length, null)
         this.increaseProgress(result.bytesRead)
         if (this.getCompletedBytes() >= this.getSize()) {
             this.setCompleted(true)
@@ -417,14 +423,37 @@ class ElectronFileUpload extends FileUpload {
     }
 
     close (): void {
-        this.electron.powerSaveBlocker.stop(this.powerSaveBlocker)
-        this.file.close()
+        void this.closeFile()
+    }
+
+    async finalize (): Promise<void> {
+        await this.closeFile()
+    }
+
+    private async closeFile (): Promise<void> {
+        this.stopPowerSaveBlocker()
+        if (this.file) {
+            const file = this.file
+            this.file = undefined
+            await file.close()
+        }
+    }
+
+    private stopPowerSaveBlocker (): void {
+        if (this.powerSaveBlocker) {
+            this.electron.powerSaveBlocker.stop(this.powerSaveBlocker)
+            this.powerSaveBlocker = 0
+        }
     }
 }
 
 class ElectronFileDownload extends FileDownload {
-    private file: fs.FileHandle
+    private file?: fs.FileHandle
+    private temporaryPath: string
     private powerSaveBlocker = 0
+    private closing?: Promise<void>
+    private finalization?: Promise<void>
+    private aborted = false
 
     constructor (
         private filePath: string,
@@ -438,7 +467,16 @@ class ElectronFileDownload extends FileDownload {
     }
 
     async open (): Promise<void> {
-        this.file = await fs.open(this.filePath, 'w', this.mode)
+        this.temporaryPath = path.join(
+            path.dirname(this.filePath),
+            `.${path.basename(this.filePath)}.tabby-download-${randomUUID()}`,
+        )
+        try {
+            this.file = await fs.open(this.temporaryPath, 'wx', this.mode)
+        } catch (e) {
+            this.stopPowerSaveBlocker()
+            throw e
+        }
     }
 
     getName (): string {
@@ -452,7 +490,7 @@ class ElectronFileDownload extends FileDownload {
     async write (buffer: Uint8Array): Promise<void> {
         let pos = 0
         while (pos < buffer.length) {
-            const result = await this.file.write(buffer, pos, buffer.length - pos, null)
+            const result = await this.file!.write(buffer, pos, buffer.length - pos, null)
             this.increaseProgress(result.bytesWritten)
             pos += result.bytesWritten
         }
@@ -462,8 +500,77 @@ class ElectronFileDownload extends FileDownload {
     }
 
     close (): void {
-        this.electron.powerSaveBlocker.stop(this.powerSaveBlocker)
-        this.file.close()
+        void this.finalize().catch(() => this.abortDownload())
+    }
+
+    async finalize (): Promise<void> {
+        this.finalization ??= this.commit()
+        await this.finalization
+    }
+
+    protected abort (): void {
+        this.aborted = true
+        void this.abortDownload()
+    }
+
+    private async commit (): Promise<void> {
+        if (this.aborted) {
+            throw new Error('Download was cancelled')
+        }
+        await this.file?.sync()
+        await this.closeFile()
+
+        if (process.platform !== 'win32') {
+            await fs.rename(this.temporaryPath, this.filePath)
+            return
+        }
+
+        const backupPath = `${this.filePath}.tabby-backup-${randomUUID()}`
+        let hasBackup = false
+        try {
+            await fs.rename(this.filePath, backupPath)
+            hasBackup = true
+        } catch (e) {
+            if ((e as { code?: string }).code !== 'ENOENT') {
+                throw e
+            }
+        }
+
+        try {
+            await fs.rename(this.temporaryPath, this.filePath)
+        } catch (e) {
+            if (hasBackup) {
+                await fs.rename(backupPath, this.filePath)
+            }
+            throw e
+        }
+        if (hasBackup) {
+            await fs.unlink(backupPath).catch(() => undefined)
+        }
+    }
+
+    private async abortDownload (): Promise<void> {
+        await this.closeFile().catch(() => undefined)
+        if (this.temporaryPath) {
+            await fs.unlink(this.temporaryPath).catch(() => undefined)
+        }
+    }
+
+    private async closeFile (): Promise<void> {
+        this.stopPowerSaveBlocker()
+        if (!this.closing) {
+            const file = this.file
+            this.file = undefined
+            this.closing = file ? file.close() : Promise.resolve()
+        }
+        await this.closing
+    }
+
+    private stopPowerSaveBlocker (): void {
+        if (this.powerSaveBlocker) {
+            this.electron.powerSaveBlocker.stop(this.powerSaveBlocker)
+            this.powerSaveBlocker = 0
+        }
     }
 }
 

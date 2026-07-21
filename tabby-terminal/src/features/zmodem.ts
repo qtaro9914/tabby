@@ -301,7 +301,7 @@ class ZModemMiddleware extends SessionMiddleware {
                 transfer.cancel()
                 this.showMessage(colors.bgRed.black(' Canceled ') + ' ' + details.name)
             } else {
-                transfer.close()
+                await transfer.finalize()
                 this.showMessage(colors.bgGreen.black(' Received ') + ' ' + details.name)
             }
         } catch {
@@ -344,7 +344,7 @@ class ZModemMiddleware extends SessionMiddleware {
             if (canceled) {
                 transfer.cancel()
             } else {
-                transfer.close()
+                await transfer.finalize()
             }
 
             await xfer.end()

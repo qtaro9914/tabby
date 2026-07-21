@@ -58,6 +58,12 @@ export class SFTPFileHandle {
         await this.inner.writeAll(chunk)
     }
 
+    async flush (): Promise<void> {
+        if (typeof (this.inner as any)?.flush === 'function') {
+            await (this.inner as any).flush()
+        }
+    }
+
     async close (): Promise<void> {
         await this.inner?.shutdown()
         this.inner = null
@@ -134,9 +140,14 @@ export class SFTPSession {
 
     async upload (path: string, transfer: FileUpload): Promise<void> {
         this.logger.info('Uploading into', path)
-        const tempPath = path + '.tabby-upload'
+        const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+        const tempPath = `${path}.tabby-upload-${suffix}`
+        const backupPath = `${path}.tabby-backup-${suffix}`
+        let handle: SFTPFileHandle|null = null
+        let temporaryFileExists = false
         try {
-            const handle = await this.open(tempPath, russh.OPEN_WRITE | russh.OPEN_CREATE)
+            handle = await this.open(tempPath, russh.OPEN_WRITE | russh.OPEN_CREATE | russh.OPEN_TRUNCATE)
+            temporaryFileExists = true
             // Overlap reading the next local chunk with the in-flight network
             // write. Only one read and one write are ever outstanding — the
             // russh handle does not guarantee ordering for concurrent calls
@@ -147,14 +158,42 @@ export class SFTPSession {
                 await handle.write(chunk)
                 chunk = await nextChunk
             }
+            transfer.setCompleted(true)
+            await transfer.finalize()
+            await handle.flush()
             await handle.close()
-            await this.unlink(path).catch(() => null)
-            await this.rename(tempPath, path)
-            transfer.close()
+            handle = null
+
+            const destinationExists = await this.stat(path).then(() => true, () => false)
+            if (destinationExists) {
+                await this.rename(path, backupPath)
+            }
+            try {
+                await this.rename(tempPath, path)
+                temporaryFileExists = false
+            } catch (e) {
+                if (destinationExists) {
+                    await this.rename(backupPath, path)
+                }
+                throw e
+            }
+            if (destinationExists) {
+                await this.unlink(backupPath).catch(e => {
+                    this.logger.warn('Could not remove SFTP upload backup', e)
+                })
+            }
         } catch (e) {
             transfer.cancel()
-            this.unlink(tempPath).catch(() => null)
             throw e
+        } finally {
+            try {
+                await handle?.close()
+            } catch (e) {
+                this.logger.warn('Could not close SFTP upload handle', e)
+            }
+            if (temporaryFileExists) {
+                await this.unlink(tempPath).catch(() => undefined)
+            }
         }
     }
 
@@ -177,7 +216,8 @@ export class SFTPSession {
                     chunk = await nextChunk
                 }
             }
-            transfer.close()
+            transfer.setCompleted(true)
+            await transfer.finalize()
         } catch (e) {
             transfer.cancel()
             throw e

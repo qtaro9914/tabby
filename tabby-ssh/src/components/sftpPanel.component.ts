@@ -1,7 +1,7 @@
 import * as C from 'constants'
 import { posix as path } from 'path'
 import { Component, Input, Output, EventEmitter, Inject, Optional } from '@angular/core'
-import { FileUpload, DirectoryUpload, DirectoryDownload, MenuItemOptions, NotificationsService, PlatformService } from 'tabby-core'
+import { FileUpload, DirectoryUpload, MenuItemOptions, NotificationsService, PlatformService } from 'tabby-core'
 import { SFTPSession, SFTPFile } from '../session/sftp'
 import { SSHSession } from '../session/ssh'
 import { SFTPContextMenuItemProvider } from '../api'
@@ -11,6 +11,11 @@ import { SFTPCreateDirectoryModalComponent } from './sftpCreateDirectoryModal.co
 interface PathSegment {
     name: string
     path: string
+}
+
+interface DownloadManifestEntry {
+    file: SFTPFile
+    relativePath: string
 }
 
 @Component({
@@ -209,7 +214,13 @@ export class SFTPPanelComponent {
 
     async upload (): Promise<void> {
         const transfers = await this.platform.startUpload({ multiple: true })
-        await Promise.all(transfers.map(t => this.uploadOne(t)))
+        const savedPath = this.path
+        await this.runWithConcurrency(transfers, 4, transfer =>
+            this.sftp.upload(path.join(savedPath, transfer.getName()), transfer),
+        )
+        if (this.path === savedPath) {
+            await this.navigate(this.path)
+        }
     }
 
     async uploadFolder (): Promise<void> {
@@ -249,7 +260,12 @@ export class SFTPPanelComponent {
         if (!transfer) {
             return
         }
-        this.sftp.download(itemPath, transfer)
+        try {
+            await this.sftp.download(itemPath, transfer)
+        } catch (error) {
+            this.notifications.error(`Failed to download ${path.basename(itemPath)}: ${error.message}`)
+            throw error
+        }
     }
 
     async downloadFolder (folder: SFTPFile): Promise<void> {
@@ -259,12 +275,25 @@ export class SFTPPanelComponent {
                 return
             }
 
-            // Start background size calculation and download simultaneously
-            const sizeCalculationPromise = this.calculateFolderSizeAndUpdate(folder, transfer)
-            const downloadPromise = this.downloadFolderRecursive(folder, transfer, '')
-
             try {
-                await Promise.all([sizeCalculationPromise, downloadPromise])
+                transfer.setStatus('Scanning')
+                const manifest: DownloadManifestEntry[] = []
+                const totalSize = await this.buildDownloadManifest(folder, '', manifest)
+                transfer.setTotalSize(totalSize)
+
+                for (const entry of manifest) {
+                    if (transfer.isCancelled()) {
+                        throw new Error('Download cancelled')
+                    }
+                    transfer.setStatus(entry.relativePath)
+                    if (entry.file.isDirectory) {
+                        await transfer.createDirectory(entry.relativePath)
+                    } else {
+                        const fileDownload = await transfer.createFile(entry.relativePath, entry.file.mode, entry.file.size)
+                        await this.sftp.download(entry.file.fullPath, fileDownload)
+                        transfer.reportFileCompleted(entry.file.size)
+                    }
+                }
                 transfer.setStatus('')
                 transfer.setCompleted(true)
             } catch (error) {
@@ -279,39 +308,34 @@ export class SFTPPanelComponent {
         }
     }
 
-    private async calculateFolderSizeAndUpdate (folder: SFTPFile, transfer: DirectoryDownload) {
+    private async buildDownloadManifest (
+        folder: SFTPFile,
+        relativePath: string,
+        manifest: DownloadManifestEntry[],
+    ): Promise<number> {
         let totalSize = 0
         const items = await this.sftp.readdir(folder.fullPath)
         for (const item of items) {
+            const itemRelativePath = relativePath ? `${relativePath}/${item.name}` : item.name
+            manifest.push({ file: item, relativePath: itemRelativePath })
             if (item.isDirectory) {
-                totalSize += await this.calculateFolderSizeAndUpdate(item, transfer)
+                totalSize += await this.buildDownloadManifest(item, itemRelativePath, manifest)
             } else {
                 totalSize += item.size
             }
-            transfer.setTotalSize(totalSize)
         }
         return totalSize
     }
 
-    private async downloadFolderRecursive (folder: SFTPFile, transfer: DirectoryDownload, relativePath: string): Promise<void> {
-        const items = await this.sftp.readdir(folder.fullPath)
-
-        for (const item of items) {
-            if (transfer.isCancelled()) {
-                throw new Error('Download cancelled')
-            }
-
-            const itemRelativePath = relativePath ? `${relativePath}/${item.name}` : item.name
-
-            transfer.setStatus(itemRelativePath)
-            if (item.isDirectory) {
-                await transfer.createDirectory(itemRelativePath)
-                await this.downloadFolderRecursive(item, transfer, itemRelativePath)
-            } else {
-                const fileDownload = await transfer.createFile(itemRelativePath, item.mode, item.size)
-                await this.sftp.download(item.fullPath, fileDownload)
+    private async runWithConcurrency<T> (items: T[], concurrency: number, task: (item: T) => Promise<void>): Promise<void> {
+        let nextIndex = 0
+        const worker = async () => {
+            while (nextIndex < items.length) {
+                const item = items[nextIndex++]
+                await task(item)
             }
         }
+        await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()))
     }
 
     getModeString (item: SFTPFile): string {

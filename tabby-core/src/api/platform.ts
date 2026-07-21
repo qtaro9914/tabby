@@ -25,6 +25,10 @@ export abstract class FileTransfer {
     abstract getSize (): number
     abstract close (): void
 
+    async finalize (): Promise<void> {
+        this.close()
+    }
+
     getSpeed (): number {
         return this.lastChunkSpeed
     }
@@ -51,7 +55,8 @@ export abstract class FileTransfer {
 
     cancel (): void {
         this.cancelled = true
-        this.close()
+        this.completed = false
+        this.abort()
     }
 
     setStatus (status: string): void {
@@ -71,16 +76,25 @@ export abstract class FileTransfer {
             return
         }
         this.completedBytes += bytes
-        this.lastChunkSpeed = bytes * 1000 / (Date.now() - this.lastChunkStartTime)
-        this.lastChunkStartTime = Date.now()
+        const now = Date.now()
+        this.speedSamples.push({ time: now, bytes: this.completedBytes })
+        while (this.speedSamples.length > 2 && this.speedSamples[1].time < now - 1000) {
+            this.speedSamples.shift()
+        }
+        const first = this.speedSamples[0]
+        this.lastChunkSpeed = (this.completedBytes - first.bytes) * 1000 / Math.max(now - first.time, 1)
+    }
+
+    protected abort (): void {
+        this.close()
     }
 
     private completedBytes = 0
     private totalSize = 0
-    private lastChunkStartTime = Date.now()
+    private speedSamples = [{ time: Date.now(), bytes: 0 }]
     private lastChunkSpeed = 0
     private cancelled = false
-    private completed = false
+    protected completed = false
     private status = ''
 }
 
@@ -91,6 +105,14 @@ export abstract class FileDownload extends FileTransfer {
 export abstract class DirectoryDownload extends FileTransfer {
     abstract createDirectory (relativePath: string): Promise<void>
     abstract createFile (relativePath: string, mode: number, size: number): Promise<FileDownload>
+
+    reportFileCompleted (size: number): void {
+        this.increaseProgress(size)
+    }
+
+    isComplete (): boolean {
+        return this.completed
+    }
 }
 
 export abstract class FileUpload extends FileTransfer {

@@ -91,8 +91,8 @@ export class DebugDecorator extends TerminalDecorator {
         const data = Buffer.from(content)
         const transfer = await this.platform.startDownload(name, 0o644, data.length)
         if (transfer) {
-            transfer.write(data)
-            transfer.close()
+            await transfer.write(data)
+            await transfer.finalize()
         }
     }
 
