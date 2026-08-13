@@ -50,6 +50,8 @@ type AuthMethod = {
     kind: 'pageant',
 }))
 
+type SFTPChannelRole = 'interactive'|'transfer'
+
 function sshAuthTypeForMethod (m: AuthMethod): string {
     switch (m.type) {
         case 'none': return 'none'
@@ -126,6 +128,9 @@ export class SSHSession {
     private knownHosts: SSHKnownHostsService
     private privateKeyImporters: AutoPrivateKeyLocator[]
     private previouslyDisconnected = false
+    private sftpSessions: Partial<Record<SFTPChannelRole, SFTPSession>> = {}
+    private sftpOpening: Partial<Record<SFTPChannelRole, Promise<SFTPSession>>> = {}
+    private transferSFTPFallback = false
 
     constructor (
         private injector: Injector,
@@ -361,14 +366,68 @@ export class SSHSession {
         return null
     }
 
-    async openSFTP (): Promise<SFTPSession> {
+    async openSFTP (role: SFTPChannelRole = 'interactive'): Promise<SFTPSession> {
         if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {
             throw new Error('Cannot open SFTP session before auth')
         }
-        if (!this.sftp) {
-            this.sftp = await this.ssh.activateSFTP(await this.ssh.openSessionChannel())
+
+        if (role === 'transfer' && this.transferSFTPFallback) {
+            return this.openSFTP('interactive')
         }
-        return new SFTPSession(this.sftp, this.injector)
+
+        const existing = this.sftpSessions[role]
+        if (existing) {
+            return existing
+        }
+
+        const opening = this.sftpOpening[role]
+        if (opening) {
+            return opening
+        }
+
+        const openingSession = this.createSFTPSessionWithFallback(role)
+        this.sftpOpening[role] = openingSession
+        try {
+            return await openingSession
+        } finally {
+            if (this.sftpOpening[role] === openingSession) {
+                this.sftpOpening[role] = undefined
+            }
+        }
+    }
+
+    private async createSFTPSessionWithFallback (role: SFTPChannelRole): Promise<SFTPSession> {
+        try {
+            return await this.createSFTPSession(role)
+        } catch (error) {
+            if (role !== 'transfer') {
+                throw error
+            }
+            this.transferSFTPFallback = true
+            this.logger.warn('Could not open a dedicated SFTP transfer channel, falling back to the interactive channel', error)
+            return this.openSFTP('interactive')
+        }
+    }
+
+    private async createSFTPSession (role: SFTPChannelRole): Promise<SFTPSession> {
+        if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {
+            throw new Error('Cannot open SFTP session before auth')
+        }
+        const sftp = await this.ssh.activateSFTP(await this.ssh.openSessionChannel())
+        if (role === 'interactive') {
+            this.sftp = sftp
+        }
+        const session = new SFTPSession(sftp, this.injector)
+        this.sftpSessions[role] = session
+        session.closed$.subscribe(() => {
+            if (this.sftpSessions[role] === session) {
+                this.sftpSessions[role] = undefined
+            }
+            if (role === 'interactive' && this.sftp === sftp) {
+                this.sftp = undefined
+            }
+        })
+        return session
     }
 
     async start (): Promise<void> {

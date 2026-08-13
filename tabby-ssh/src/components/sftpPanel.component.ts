@@ -209,10 +209,14 @@ export class SFTPPanelComponent {
 
     async upload (): Promise<void> {
         const transfers = await this.platform.startUpload({ multiple: true })
+        if (!transfers.length) {
+            return
+        }
         const savedPath = this.path
         try {
+            const sftp = await this.openTransferSFTP()
             await this.runWithConcurrency(transfers, 4, transfer =>
-                this.sftp.upload(path.join(savedPath, transfer.getName()), transfer),
+                sftp.upload(path.join(savedPath, transfer.getName()), transfer),
             )
         } catch (error) {
             for (const transfer of transfers) {
@@ -228,42 +232,63 @@ export class SFTPPanelComponent {
     async uploadFolder (): Promise<void> {
         const transfer = await this.platform.startUploadDirectory()
         const savedPath = this.path
-        try {
-            await this.uploadOneFolder(transfer)
-        } catch (error) {
-            this.cancelDirectoryUpload(transfer)
-            throw error
-        }
+        await this.uploadOneFolder(transfer)
         if (this.path === savedPath) {
             await this.navigate(this.path)
         }
     }
 
-    async uploadOneFolder (transfer: DirectoryUpload, accumPath = ''): Promise<void> {
+    async uploadOneFolder (transfer: DirectoryUpload): Promise<void> {
+        const basePath = this.path
+        try {
+            const sftp = await this.openTransferSFTP()
+            await this.uploadFolderContents(transfer, sftp, basePath)
+        } catch (error) {
+            this.cancelDirectoryUpload(transfer)
+            throw error
+        }
+    }
+
+    async openTransferSFTP (): Promise<SFTPSession> {
+        return this.session.openSFTP('transfer')
+    }
+
+    private async uploadFolderContents (
+        transfer: DirectoryUpload,
+        sftp: SFTPSession,
+        basePath: string,
+        accumPath = '',
+    ): Promise<void> {
         for(const t of transfer.getChildrens()) {
             if (t instanceof DirectoryUpload) {
-                const remotePath = path.posix.join(this.path, accumPath, t.getName())
+                const remotePath = path.posix.join(basePath, accumPath, t.getName())
                 try {
-                    await this.sftp.mkdir(remotePath)
+                    await sftp.mkdir(remotePath)
                 } catch (error) {
-                    const existing = await this.sftp.stat(remotePath).catch(() => null)
+                    const existing = await sftp.stat(remotePath).catch(() => null)
                     if (!existing?.isDirectory) {
                         throw error
                     }
                 }
-                await this.uploadOneFolder(t, path.posix.join(accumPath, t.getName()))
-                await this.sftp.chmod(remotePath, t.getMode() & 0o7777).catch(error => {
+                await this.uploadFolderContents(t, sftp, basePath, path.posix.join(accumPath, t.getName()))
+                await sftp.chmod(remotePath, t.getMode() & 0o7777).catch(error => {
                     console.warn('Could not preserve SFTP directory permissions:', remotePath, error)
                 })
             } else {
-                await this.sftp.upload(path.posix.join(this.path, accumPath, t.getName()), t)
+                await sftp.upload(path.posix.join(basePath, accumPath, t.getName()), t)
             }
         }
     }
 
     async uploadOne (transfer: FileUpload): Promise<void> {
         const savedPath = this.path
-        await this.sftp.upload(path.join(this.path, transfer.getName()), transfer)
+        try {
+            const sftp = await this.openTransferSFTP()
+            await sftp.upload(path.join(savedPath, transfer.getName()), transfer)
+        } catch (error) {
+            transfer.fail(error)
+            throw error
+        }
         if (this.path === savedPath) {
             await this.navigate(this.path)
         }
@@ -275,8 +300,10 @@ export class SFTPPanelComponent {
             return
         }
         try {
-            await this.sftp.download(itemPath, transfer)
+            const sftp = await this.openTransferSFTP()
+            await sftp.download(itemPath, transfer)
         } catch (error) {
+            transfer.fail(error)
             this.notifications.error(`Failed to download ${path.basename(itemPath)}: ${error.message}`)
             throw error
         }
@@ -290,8 +317,9 @@ export class SFTPPanelComponent {
             }
 
             try {
+                const sftp = await this.openTransferSFTP()
                 transfer.setStatus('Downloading')
-                const totalSize = await this.downloadFolderContents(folder, '', transfer)
+                const totalSize = await this.downloadFolderContents(folder, '', transfer, sftp)
                 if (folder.mode) {
                     await transfer.setDirectoryMode('', folder.mode)
                 }
@@ -318,9 +346,10 @@ export class SFTPPanelComponent {
         folder: SFTPFile,
         relativePath: string,
         transfer: DirectoryDownload,
+        sftp: SFTPSession,
     ): Promise<number> {
         let totalSize = 0
-        const items = await this.sftp.readdir(folder.fullPath)
+        const items = await sftp.readdir(folder.fullPath)
         for (const item of items) {
             if (transfer.isCancelled()) {
                 throw new Error('Download cancelled')
@@ -328,19 +357,19 @@ export class SFTPPanelComponent {
             const itemRelativePath = relativePath ? `${relativePath}/${item.name}` : item.name
             transfer.setStatus(itemRelativePath)
             if (item.isSymlink) {
-                const target = await this.sftp.readlink(item.fullPath)
+                const target = await sftp.readlink(item.fullPath)
                 const targetPath = path.resolve(path.dirname(item.fullPath), target)
-                const targetIsDirectory = await this.sftp.stat(targetPath).then(stat => stat.isDirectory, () => false)
+                const targetIsDirectory = await sftp.stat(targetPath).then(stat => stat.isDirectory, () => false)
                 await transfer.createSymbolicLink(itemRelativePath, target, targetIsDirectory)
             } else if (item.isDirectory) {
                 await transfer.createDirectory(itemRelativePath)
-                totalSize += await this.downloadFolderContents(item, itemRelativePath, transfer)
+                totalSize += await this.downloadFolderContents(item, itemRelativePath, transfer, sftp)
                 if (item.mode) {
                     await transfer.setDirectoryMode(itemRelativePath, item.mode)
                 }
             } else {
                 const fileDownload = await transfer.createFile(itemRelativePath, item.mode, item.size)
-                await this.sftp.download(item.fullPath, fileDownload)
+                await sftp.download(item.fullPath, fileDownload)
                 transfer.reportFileCompleted(item.size)
                 totalSize += item.size
             }

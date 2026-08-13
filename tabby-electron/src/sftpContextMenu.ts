@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import { Subject, debounceTime, debounce } from 'rxjs'
 import { Injectable } from '@angular/core'
 import { MenuItemOptions, TranslateService } from 'tabby-core'
-import { SFTPFile, SFTPPanelComponent, SFTPContextMenuItemProvider, SFTPSession } from 'tabby-ssh'
+import { SFTPFile, SFTPPanelComponent, SFTPContextMenuItemProvider } from 'tabby-ssh'
 import { ElectronPlatformService, resolveInsideBase } from './services/platform.service'
 
 
@@ -30,20 +30,24 @@ export class EditSFTPContextMenu extends SFTPContextMenuItemProvider {
         ]
         if (!item.isDirectory) {
             items.push({
-                click: () => this.edit(item, panel.sftp),
+                click: () => this.edit(item, panel),
                 label: this.translate.instant('Edit locally'),
             })
         }
         return items
     }
 
-    private async edit (item: SFTPFile, sftp: SFTPSession) {
+    private async edit (item: SFTPFile, panel: SFTPPanelComponent) {
         const tempDir = (await tmp.dir({ unsafeCleanup: true })).path
         const tempPath = resolveInsideBase(tempDir, item.name)
         const transfer = await this.platform.startDownload(item.name, item.mode, item.size, tempPath)
         if (!transfer) {
             return
         }
+        const sftp = await panel.openTransferSFTP().catch(error => {
+            transfer.fail(error)
+            throw error
+        })
         await sftp.download(item.fullPath, transfer)
         this.platform.openPath(tempPath)
 
