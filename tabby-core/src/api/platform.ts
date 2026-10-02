@@ -1,4 +1,4 @@
-import { MenuItemOptions } from './menu'
+import type { MenuItemOptions } from './menu'
 import { Subject, Observable } from 'rxjs'
 
 /* eslint-disable @typescript-eslint/no-unused-vars */
@@ -106,6 +106,9 @@ export abstract class FileTransfer {
     }
 
     setCompleted (completed: boolean): void {
+        if (this.isCancelled() || this.isFailed()) {
+            return
+        }
         this.state = completed ? 'succeeded' : 'running'
         if (completed) {
             this.lastChunkSpeed = 0

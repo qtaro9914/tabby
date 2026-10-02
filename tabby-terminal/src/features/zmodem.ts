@@ -393,12 +393,12 @@ class ZModemMiddleware extends SessionMiddleware {
             transferClosed = true
 
             await xfer.end()
-            transfer.setCompleted(true)
 
             // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
             if (canceled) {
                 this.showMessage(colors.bgRed.black(' Canceled ') + ' ' + offer.name)
             } else {
+                transfer.setCompleted(true)
                 this.showMessage(colors.bgGreen.black(' Sent ') + ' ' + offer.name)
             }
         } catch (error) {
