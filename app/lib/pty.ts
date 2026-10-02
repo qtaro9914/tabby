@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { ipcMain } from 'electron'
 import { Application } from './app'
 import { UTF8Splitter } from './utfSplitter'
-import { Subject, Subscription, debounceTime } from 'rxjs'
+import { Observable, Subject, Subscription, debounceTime } from 'rxjs'
 
 class PTYDataQueue {
     private buffers: Buffer[] = []
@@ -75,11 +75,11 @@ class PTYDataQueue {
                 return
             }
 
-            const buffersToSend = []
+            const buffersToSend: Buffer[] = []
             let totalLength = 0
             while (totalLength < this.maxChunk && this.buffers.length) {
                 totalLength += this.buffers[0].length
-                buffersToSend.push(this.buffers.shift())
+                buffersToSend.push(this.buffers.shift()!)
             }
 
             if (buffersToSend.length === 0) {
@@ -121,9 +121,10 @@ class PTYDataQueue {
 export class PTY {
     private pty: nodePTY.IPty
     private outputQueue: PTYDataQueue
+    private closedSubject = new Subject<void>()
     exited = false
 
-    constructor (private id: string, private app: Application, onExit: () => void, ...args: any[]) {
+    constructor (private id: string, private app: Application, ...args: any[]) {
         this.pty = (nodePTY as any).spawn(...args)
         for (const key of ['close', 'exit']) {
             (this.pty as any).on(key, (...eventArgs) => this.emit(key, ...eventArgs))
@@ -137,12 +138,17 @@ export class PTY {
         this.pty.onExit(() => {
             this.exited = true
             this.outputQueue.dispose()
-            onExit()
+            this.closedSubject.next()
+            this.closedSubject.complete()
         })
     }
 
     getPID (): number {
         return this.pty.pid
+    }
+
+    get closed$ (): Observable<void> {
+        return this.closedSubject.asObservable()
     }
 
     resize (columns: number, rows: number): void {
@@ -167,6 +173,10 @@ export class PTY {
 
     private emit (event: string, ...args: any[]) {
         this.app.broadcast(`pty:${this.id}:${event}`, ...args)
+        if (event === 'close') {
+            this.closedSubject.next()
+            this.closedSubject.complete()
+        }
     }
 }
 
@@ -176,18 +186,36 @@ export class PTYManager {
     init (app: Application): void {
         ipcMain.on('pty:spawn', (event, ...options) => {
             const id = uuidv4().toString()
-            event.returnValue = id
-            const pty = new PTY(id, app, () => {
-                if (this.ptys.get(id) === pty) {
-                    this.ptys.delete(id)
+
+            try {
+                const pty = new PTY(id, app, ...options)
+                this.ptys.set(id, pty)
+
+                // A PTY owns its output queue and native event handlers. Release
+                // the manager's reference as soon as the child process exits so
+                // repeatedly opened terminals cannot accumulate in this table.
+                pty.closed$.subscribe(() => {
+                    if (this.ptys.get(id) === pty) {
+                        this.ptys.delete(id)
+                    }
+                })
+            } catch (error) {
+                // Spawning fails for reasons the user can act on - an invalid
+                // working directory being by far the most common one. Reporting
+                // that back beats taking down the main process with an
+                // uncaught exception.
+                const cwd = options[2]?.cwd
+                event.returnValue = {
+                    error: cwd ? `${error.message} (working directory: ${cwd})` : error.message,
                 }
-            }, ...options)
-            this.ptys.set(id, pty)
+                return
+            }
+            event.returnValue = { id }
         })
 
         ipcMain.on('pty:exists', (event, id) => {
             const pty = this.ptys.get(id)
-            event.returnValue = !!pty && !pty.exited
+            event.returnValue = Boolean(pty && !pty.exited)
         })
 
         ipcMain.on('pty:get-pid', (event, id) => {

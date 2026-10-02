@@ -195,6 +195,7 @@ export class SFTPSession {
             }
             transfer.setCompleted(true)
         } catch (e) {
+            transfer.setStatus(e instanceof Error ? e.message : String(e))
             transfer.fail(e)
             throw e
         } finally {
@@ -232,6 +233,7 @@ export class SFTPSession {
             await transfer.finalize()
             transfer.setCompleted(true)
         } catch (e) {
+            transfer.setStatus(e instanceof Error ? e.message : String(e))
             transfer.fail(e)
             throw e
         } finally {
