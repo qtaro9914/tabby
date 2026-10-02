@@ -16,6 +16,7 @@ import { SSHAlgorithmType, SSHProfile, AutoPrivateKeyLocator, PortForwardType } 
 import { ForwardedPort } from './forwards'
 import { X11Socket } from './x11'
 import { supportedAlgorithms } from '../algorithms'
+import { forwardSocketChannel } from './socketChannel'
 import * as russh from 'russh'
 
 const WINDOWS_OPENSSH_AGENT_PIPE = '\\\\.\\pipe\\openssh-ssh-agent'
@@ -947,110 +948,7 @@ export class SSHSession {
     }
 
     private setupSocketChannelEvents (channel: russh.Channel, socket: Socket, logPrefix: string): void {
-        const MAX_PENDING_SOCKET_BYTES = 8 * 1024 * 1024
-        const pendingSocketWrites: Buffer[] = []
-        let pendingSocketBytes = 0
-        let socketBackpressured = false
-        let closed = false
-        let channelCloseRequested = false
-        let channelWrite = Promise.resolve()
-
-        const closeChannel = () => {
-            if (channelCloseRequested) {
-                return
-            }
-            channelCloseRequested = true
-            void channel.close().catch(error => {
-                this.logger.debug(`${logPrefix}: channel close failed: ${error}`)
-            })
-        }
-        const fail = (error: unknown) => {
-            if (closed) {
-                return
-            }
-            closed = true
-            this.logger.error(`${logPrefix}: forwarding failed: ${error}`)
-            pendingSocketWrites.length = 0
-            pendingSocketBytes = 0
-            socket.destroy()
-            closeChannel()
-        }
-        const flushSocketWrites = () => {
-            if (closed) {
-                return
-            }
-            socketBackpressured = false
-            while (pendingSocketWrites.length) {
-                const data = pendingSocketWrites.shift()!
-                pendingSocketBytes -= data.length
-                if (!socket.write(data)) {
-                    socketBackpressured = true
-                    break
-                }
-            }
-        }
-
-        channel.data$.subscribe({
-            next: data => {
-                if (closed) {
-                    return
-                }
-                const buffer = Buffer.from(data)
-                if (!socketBackpressured && !pendingSocketWrites.length) {
-                    socketBackpressured = !socket.write(buffer)
-                    return
-                }
-                pendingSocketWrites.push(buffer)
-                pendingSocketBytes += buffer.length
-                if (pendingSocketBytes > MAX_PENDING_SOCKET_BYTES) {
-                    fail(new Error(`socket write queue exceeded ${MAX_PENDING_SOCKET_BYTES} bytes`))
-                }
-            },
-            error: fail,
-        })
-        socket.on('drain', flushSocketWrites)
-
-        socket.on('data', data => {
-            socket.pause()
-            channelWrite = channelWrite.then(() =>
-                channel.write(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)),
-            ).then(() => {
-                if (!closed) {
-                    socket.resume()
-                }
-            }).catch(fail)
-        })
-
-        // Handle EOF from remote
-        channel.eof$.subscribe(() => {
-            this.logger.debug(`${logPrefix}: channel EOF received, ending socket`)
-            socket.end()
-        })
-
-        // Handle channel close
-        channel.closed$.subscribe(() => {
-            this.logger.debug(`${logPrefix}: channel closed, destroying socket`)
-            closed = true
-            socket.destroy()
-        })
-
-        // Handle socket errors
-        socket.on('error', err => {
-            fail(err)
-        })
-
-        // Handle socket close
-        socket.on('close', () => {
-            this.logger.debug(`${logPrefix}: socket closed, closing channel`)
-            closed = true
-            closeChannel()
-        })
-
-        // Handle EOF from local
-        socket.on('end', () => {
-            this.logger.debug(`${logPrefix}: socket end, sending EOF to channel`)
-            void channel.eof().catch(fail)
-        })
+        forwardSocketChannel(channel, socket, this.logger, logPrefix)
     }
 
     private setupAgentChannelEvents (channel: russh.Channel, agent: russh.SSHAgentStream): void {
