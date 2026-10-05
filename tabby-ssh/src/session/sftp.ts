@@ -91,9 +91,14 @@ export class SFTPFileHandle {
         }
     }
 
+    // Issues CLOSE at most once, even if it fails: drop the reference before
+    // awaiting so later close() calls (e.g. cleanup in a finally) are no-ops.
+    // A reissued CLOSE could hit a handle id the server has since reused for
+    // another open file
     async close (): Promise<void> {
-        await this.inner?.shutdown()
+        const inner = this.inner
         this.inner = null
+        await inner?.shutdown()
     }
 }
 
