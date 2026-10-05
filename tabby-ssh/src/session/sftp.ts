@@ -29,9 +29,9 @@ export class SFTPFileHandle {
         return this.inner.read(1024 * 1024)
     }
 
-    // readAt/readLimit exist only in the patched russh fork (positional,
-    // request-id multiplexed reads) — access via `any` and feature-detect
-    // so this still builds and runs against the stock npm russh
+    // readAt/readLimit/writeAt exist only in the patched russh fork
+    // (positional, request-id multiplexed I/O) — access via `any` and
+    // feature-detect so this still builds and runs against the stock npm russh
 
     get supportsReadAt (): boolean {
         return typeof (this.inner as any)?.readAt === 'function'
@@ -56,6 +56,17 @@ export class SFTPFileHandle {
             throw new Error('File handle is closed')
         }
         await this.inner.writeAll(chunk)
+    }
+
+    get supportsWriteAt (): boolean {
+        return typeof (this.inner as any)?.writeAt === 'function'
+    }
+
+    async writeAt (offset: number, chunk: Uint8Array): Promise<void> {
+        if (!this.inner) {
+            throw new Error('File handle is closed')
+        }
+        await (this.inner as any).writeAt(offset, chunk)
     }
 
     async flush (): Promise<void> {
@@ -148,15 +159,20 @@ export class SFTPSession {
         try {
             handle = await this.open(tempPath, russh.OPEN_WRITE | russh.OPEN_CREATE | russh.OPEN_TRUNCATE)
             temporaryFileExists = true
-            // Overlap reading the next local chunk with the in-flight network
-            // write. Only one read and one write are ever outstanding — the
-            // russh handle does not guarantee ordering for concurrent calls
-            let chunk = await transfer.read()
-            while (chunk.length) {
-                const nextChunk = transfer.read()
-                nextChunk.catch(() => undefined)
-                await handle.write(chunk)
-                chunk = await nextChunk
+            if (handle.supportsWriteAt) {
+                await this.uploadWithWriteBehind(handle, transfer)
+            } else {
+                // Stock russh: overlap reading the next local chunk with the
+                // in-flight network write. Only one read and one write are ever
+                // outstanding — the russh handle does not guarantee ordering
+                // for concurrent cursor writes
+                let chunk = await transfer.read()
+                while (chunk.length) {
+                    const nextChunk = transfer.read()
+                    nextChunk.catch(() => undefined)
+                    await handle.write(chunk)
+                    chunk = await nextChunk
+                }
             }
             transfer.setFinalizing()
             await transfer.finalize()
@@ -242,6 +258,36 @@ export class SFTPSession {
             } catch (e) {
                 this.logger.warn('Could not close SFTP download handle', e)
             }
+        }
+    }
+
+    // Keep multiple positional writes in flight (matched by SFTP request id)
+    // while local chunks are still read sequentially. Mirrors the download
+    // read-ahead — ~3x faster than one write at a time over loopback.
+    private async uploadWithWriteBehind (handle: SFTPFileHandle, transfer: FileUpload): Promise<void> {
+        const DEPTH = 8
+        let offset = 0
+        const queue: Promise<void>[] = []
+        try {
+            while (true) {
+                const chunk = await transfer.read()
+                if (!chunk.length) {
+                    break
+                }
+                const p = handle.writeAt(offset, chunk)
+                p.catch(() => undefined)
+                queue.push(p)
+                offset += chunk.length
+                if (queue.length >= DEPTH) {
+                    await queue.shift()
+                }
+            }
+            while (queue.length) {
+                await queue.shift()
+            }
+        } finally {
+            // never close the handle with writes still in flight
+            await Promise.allSettled(queue)
         }
     }
 
