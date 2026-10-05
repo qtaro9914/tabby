@@ -111,6 +111,53 @@ file output matches byte for byte (sha256, with the tty's `\n` → `\r\n`) and
 that the tail is rendered verbatim in xterm. Requires a prior `profiler.mjs`
 run.
 
+### tui-load.mjs — synthetic full-screen TUI load
+
+```bash
+node scripts/perf/tui-load.mjs [--fps 30] [--churn 0.3] [--colors truecolor|256|16] [--duration 0]
+```
+
+Run inside a terminal tab. htop/btop-like screen in the alternate buffer:
+cursor-addressed differential updates at a fixed frame rate (~50 KB/s at
+30 fps on a 95×33 pane), periodic full-table re-sorts, SGR colors. With
+`truecolor` the hues drift over time, so new glyph/color combinations keep
+appearing (as with a long-running btop) — this grows the WebGL glyph atlas.
+Every keystroke is echoed immediately as `ECHO:<key>` on the bottom line so a
+harness can time input → echo. Quit with `q` or Ctrl+C.
+
+### longrun.mjs — long-session degradation runner
+
+```bash
+nohup node scripts/perf/longrun.mjs --hours 4 --interval 300 --out /tmp/longrun > /tmp/longrun.log 2>&1 &
+```
+
+Launches the dev build itself (needs free ports 9222/9229; closes all tabs in
+that instance), opens two terminals running `tui-load.mjs` — side by side by
+default (`--layout split`, both rendering) or as two tabs (`--layout tabs`) —
+and appends a sample every `--interval` seconds to `<out>/samples.jsonl`:
+
+- per process type (main/renderer/GPU): CPU (`cpuCore` = % of one core from
+  `/proc` on Linux; Electron's `cpu` is relative to all cores) and working set
+- renderer and main JS heap before and after a forced GC
+- renderer frame rate (rAF over 2 s), long tasks, S2-lite µs/keystroke
+- per terminal: input → echo latency through `xterm.input()` → PTY → TUI echo
+  (arrival / parsed / rendered), xterm write-queue latency, buffer lengths,
+  renderer type, WebGL glyph atlas pages/pixels/glyphs, WebGL re-creations
+
+The runner stops the app at the end (or on SIGTERM/SIGINT/errors). Electron's
+own output goes to `<out>/electron.log`.
+
+### longrun-summary.mjs — trend summary
+
+```bash
+node scripts/perf/longrun-summary.mjs /tmp/longrun/samples.jsonl [--window 60] [--json]
+```
+
+Compares the mean of each metric over the first and last `--window` minutes
+(shrunk to a third of the run for short runs), with a least-squares slope per
+hour and up/down step counts. Flags metrics that moved >10% end to end with
+≥70% of steps in the same direction. Works on a run still in progress.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
