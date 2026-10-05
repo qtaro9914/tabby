@@ -5,6 +5,19 @@ import { Application } from './app'
 import { UTF8Splitter } from './utfSplitter'
 import { Observable, Subject, Subscription, debounceTime } from 'rxjs'
 
+// Electron IPC serializes a Buffer's whole backing ArrayBuffer, not just its
+// view. Small Buffers are views into Node's shared allocation pool (64 KiB
+// since Node 24), so a ~4 KB PTY chunk would ship 64 KiB per message. Copy it
+// into an exactly-sized, unpooled Buffer before it crosses IPC
+function toUnpooledBuffer (data: Buffer): Buffer {
+    if (data.byteOffset === 0 && data.byteLength === data.buffer.byteLength) {
+        return data
+    }
+    const copy = Buffer.allocUnsafeSlow(data.length)
+    data.copy(copy)
+    return copy
+}
+
 class PTYDataQueue {
     private buffers: Buffer[] = []
     private delta = 0
@@ -131,7 +144,8 @@ export class PTY {
         }
 
         this.outputQueue = new PTYDataQueue(this.pty, data => {
-            setImmediate(() => this.emit('data', data))
+            const payload = toUnpooledBuffer(data)
+            setImmediate(() => this.emit('data', payload))
         })
 
         this.pty.onData(data => this.outputQueue.push(Buffer.from(data)))
