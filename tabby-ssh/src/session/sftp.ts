@@ -24,6 +24,13 @@ function isRequestTimeout (error: unknown): boolean {
     return error instanceof Error && error.message === 'Timeout'
 }
 
+// The cursor-based calls (writeAll/flush/shutdown) go through russh-sftp's
+// AsyncWrite impl, which wraps the same timeout in an io::Error — both stock
+// and fork bindings surface it as this exact Debug form
+function isCursorRequestTimeout (error: unknown): boolean {
+    return error instanceof Error && error.message === 'Custom { kind: Other, error: "Timeout" }'
+}
+
 export class SFTPFileHandle {
     position = 0
 
@@ -185,7 +192,12 @@ export class SFTPSession {
             }
             transfer.setFinalizing()
             await transfer.finalize()
-            await handle.flush()
+            // fsync@openssh.com can outlast russh-sftp's 10 s request timeout
+            // on large files / slow disks. Reissuing it is a harmless re-sync
+            // and the first one keeps progressing server-side. Only flush is
+            // retried — reissuing close could double-close the handle
+            const fileHandle = handle
+            await this.retryOnTimeout(`flush of ${tempPath}`, isCursorRequestTimeout, () => fileHandle.flush())
             await handle.close()
             handle = null
             await this.chmod(tempPath, transfer.getMode() & 0o7777).catch(error => {
@@ -284,7 +296,7 @@ export class SFTPSession {
                     break
                 }
                 const chunkOffset = offset
-                const p = this.retryOnTimeout('write', chunkOffset, () => handle.writeAt(chunkOffset, chunk))
+                const p = this.retryOnTimeout(`write at offset ${chunkOffset}`, isRequestTimeout, () => handle.writeAt(chunkOffset, chunk))
                 p.catch(() => undefined)
                 queue.push(p)
                 offset += chunk.length
@@ -317,7 +329,7 @@ export class SFTPSession {
 
         // One protocol READ per call; servers may return short reads, so
         // extend at the adjusted offset until the slot is full or EOF
-        const readAt = (offset: number, n: number) => this.retryOnTimeout('read', offset, () => handle.readAt(offset, n))
+        const readAt = (offset: number, n: number) => this.retryOnTimeout(`read at offset ${offset}`, isRequestTimeout, () => handle.readAt(offset, n))
         const readFull = async (offset: number): Promise<Buffer> => {
             let buf = Buffer.from(await readAt(offset, chunkSize))
             while (buf.length && buf.length < chunkSize) {
@@ -360,19 +372,20 @@ export class SFTPSession {
     }
 
     // russh-sftp fails any request that gets no response within a fixed
-    // 10 s. Positional reads/writes are idempotent (same offset, same data),
-    // so one that timed out — e.g. while the server stalled on disk I/O —
-    // can safely be reissued a bounded number of times
-    private async retryOnTimeout<T> (kind: string, offset: number, op: () => Promise<T>): Promise<T> {
+    // 10 s. For idempotent operations (positional reads/writes, fsync) one
+    // that timed out — e.g. while the server stalled on disk I/O — can safely
+    // be reissued a bounded number of times. `isTimeout` must match the error
+    // form of the call being retried (positional vs. cursor-based)
+    private async retryOnTimeout<T> (what: string, isTimeout: (error: unknown) => boolean, op: () => Promise<T>): Promise<T> {
         const MAX_RETRIES = 2
         for (let attempt = 1; ; attempt++) {
             try {
                 return await op()
             } catch (e) {
-                if (attempt > MAX_RETRIES || !isRequestTimeout(e)) {
+                if (attempt > MAX_RETRIES || !isTimeout(e)) {
                     throw e
                 }
-                this.logger.warn(`SFTP ${kind} at offset ${offset} timed out (attempt ${attempt}/${MAX_RETRIES + 1}), retrying`)
+                this.logger.warn(`SFTP ${what} timed out (attempt ${attempt}/${MAX_RETRIES + 1}), retrying`)
             }
         }
     }
