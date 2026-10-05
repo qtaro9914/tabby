@@ -39,6 +39,18 @@ export class CDP {
         }
         return r.result.value
     }
+
+    // For the main-process Node inspector: the global scope there has no
+    // require(); the inspector's command line API provides one
+    async evalNode (expression) {
+        const r = await this.send('Runtime.evaluate', {
+            expression, awaitPromise: false, returnByValue: true, includeCommandLineAPI: true,
+        })
+        if (r.exceptionDetails) {
+            throw new Error('main exception: ' + JSON.stringify(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text))
+        }
+        return r.result.value
+    }
 }
 
 export const sleep = ms => new Promise(r => setTimeout(r, ms))

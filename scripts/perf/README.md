@@ -66,6 +66,51 @@ accept dialog, then emits a real ZRQINIT header via shell `printf` — once
 within a single chunk and once split across the bypass boundary. Requires a
 prior `profiler.mjs` run in the same app instance (reuses `window.__perf`).
 
+### s1-repeat.mjs — S1 without a profiler
+
+```bash
+PERF_LOG_FILE=/tmp/huge.log node scripts/perf/s1-repeat.mjs [runs=4]
+```
+
+Repeats the S1 `cat` with no CPU profiler attached (profiling slows the
+renderer) and prints per-run and mean MB/s. Closes all other tabs and
+selects the `window.__perf` tab first. Requires a prior `profiler.mjs` run.
+
+### ipc-count.mjs — PTY output IPC messages and their real size
+
+```bash
+PERF_LOG_FILE=/tmp/huge.log node scripts/perf/ipc-count.mjs
+```
+
+During one S1 `cat`, records every `pty:<id>:data` payload in the main
+process (length and backing `ArrayBuffer` size — Electron serializes the
+whole backing store, so `serializedBytes` is what actually crosses IPC) and
+the messages received in the renderer. Requires `--inspect` and a prior
+`profiler.mjs` run.
+
+### ipc-bench.mjs — main → renderer IPC micro-benchmark
+
+```bash
+node scripts/perf/ipc-bench.mjs
+```
+
+Sends 12,800 × 4095-byte Buffers via `webContents.send`, varying only where
+the Buffer's memory comes from (own `ArrayBuffer`, Node's allocation pool,
+a slice of a large Buffer). Shows the per-message cost of shipping pool
+views (`Buffer.poolSize` is 64 KiB on Node 24). Requires `--inspect`.
+
+### utf8-integrity.mjs — multi-byte output correctness
+
+```bash
+node scripts/perf/utf8-integrity.mjs [/tmp/utf8-test.log] [sizeMB=8]
+```
+
+Writes a deterministic log of 2/3/4-byte UTF-8 characters, `cat`s it and
+checks that every IPC payload is valid UTF-8 on its own, that the received
+file output matches byte for byte (sha256, with the tty's `\n` → `\r\n`) and
+that the tail is rendered verbatim in xterm. Requires a prior `profiler.mjs`
+run.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
