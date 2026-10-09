@@ -19,6 +19,7 @@ import { BaseTerminalProfile } from '../api/interfaces'
 import { getXtermBackgroundColor } from '../helpers'
 import { generatePalette } from '../generatePalette'
 import { disposeWebglAddon } from './webglAddon'
+import { handleAltArrowWordJump } from './altArrowKeys'
 import './xterm.css'
 
 const COLOR_NAMES = [
@@ -273,15 +274,8 @@ export class XTermFrontend extends Frontend {
                 return false
             }
 
-            // xterm 6 sends Alt+Left/Right as ESC[1;3D/C, which shells don't bind by default.
-            // Keep xterm 5's word-jump sequences.
-            if (
-                event.type === 'keydown' && event.altKey && !event.ctrlKey && !event.shiftKey && !event.metaKey &&
-                (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
-            ) {
-                const left = event.key === 'ArrowLeft'
-                const seq = this.hostApp.platform === Platform.macOS ? left ? '\x1bb' : '\x1bf' : left ? '\x1b[1;5D' : '\x1b[1;5C'
-                this.input.next(Buffer.from(seq, 'binary'))
+            // Keep xterm 5's Alt+Left/Right word-jump sequences
+            if (handleAltArrowWordJump(event, this.hostApp.platform === Platform.macOS, seq => this.input.next(Buffer.from(seq, 'binary')))) {
                 return false
             }
 
