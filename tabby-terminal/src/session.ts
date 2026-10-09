@@ -8,6 +8,18 @@ import { SessionMiddlewareStack } from './api/middleware'
 const MAX_INITIAL_DATA_BUFFER = 8 * 1024 * 1024
 
 /**
+ * A copy of the last `maxLength` bytes of `data` (so the oversized chunk itself can be
+ * freed), moved forward past UTF-8 continuation bytes so it doesn't start mid-character
+ */
+function utf8Tail (data: Buffer, maxLength: number): Buffer {
+    let start = data.length - maxLength
+    for (let i = 0; i < 3 && start < data.length && (data[start] & 0xc0) === 0x80; i++) {
+        start++
+    }
+    return Buffer.from(data.subarray(start))
+}
+
+/**
  * A session object for a [[BaseTerminalTabComponent]]
  * Extend this to implement custom I/O and process management for your terminal tab
  */
@@ -47,6 +59,13 @@ export abstract class BaseSession {
                 this.initialDataBufferLength += data.length
                 while (this.initialDataBufferLength > MAX_INITIAL_DATA_BUFFER && this.initialDataBuffer.length > 1) {
                     this.initialDataBufferLength -= this.initialDataBuffer.shift()!.length
+                    this.initialDataBufferTruncated = true
+                }
+                if (this.initialDataBufferLength > MAX_INITIAL_DATA_BUFFER) {
+                    // A single chunk over the limit - keep only its tail
+                    const tail = utf8Tail(this.initialDataBuffer[0], MAX_INITIAL_DATA_BUFFER)
+                    this.initialDataBuffer[0] = tail
+                    this.initialDataBufferLength = tail.length
                     this.initialDataBufferTruncated = true
                 }
             } else {

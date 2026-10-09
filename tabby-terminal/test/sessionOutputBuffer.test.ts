@@ -55,6 +55,41 @@ describe('BaseSession output before the terminal is shown', () => {
         assert.equal(body.slice(-64 * 1024), numberedChunk(319).toString())
     })
 
+    it('keeps only the tail of a single chunk over the limit', () => {
+        const session = new TestSession()
+        const out = capture(session)
+        const chunk = Buffer.alloc(16 * MB)
+        for (let i = 0; i < chunk.length; i += 4) {
+            chunk.writeUInt32BE(i, i)
+        }
+        session.emit(chunk)
+        assert.ok((session as any).initialDataBufferLength <= 8 * MB, 'the oversized chunk is retained')
+        assert.ok((session as any).initialDataBuffer[0].buffer.byteLength <= 8 * MB, 'the tail still references the oversized chunk')
+        session.releaseInitialDataBuffer()
+        const released = Buffer.concat(out)
+        const marker = Buffer.from('\x1b[0m[... earlier output dropped ...]\r\n')
+        assert.ok(released.subarray(0, marker.length).equals(marker), 'dropped output is not marked')
+        assert.ok(released.subarray(marker.length).equals(chunk.subarray(-8 * MB)), 'the kept output is not the newest 8 MB')
+    })
+
+    it('does not split a UTF-8 character when cutting a single oversized chunk', () => {
+        const session = new TestSession()
+        const out = capture(session)
+        // 3-byte characters, with a 1-byte prefix so the 8 MB cut lands inside one
+        const text = 'x' + '€'.repeat(Math.ceil(16 * MB / 3))
+        const chunk = Buffer.from(text)
+        assert.notEqual((chunk.length - 8 * MB) % 3, 1, 'the cut must not fall on a character boundary')
+        session.emit(chunk)
+        session.releaseInitialDataBuffer()
+        const marker = '\x1b[0m[... earlier output dropped ...]\r\n'
+        const released = Buffer.concat(out).toString()
+        const body = released.slice(marker.length)
+        assert.ok(!body.includes('\ufffd'), 'a character was split')
+        assert.ok(/^€+$/.test(body))
+        assert.ok(Buffer.byteLength(body) <= 8 * MB)
+        assert.ok(Buffer.byteLength(body) > 8 * MB - 3)
+    })
+
     it('buffers in linear time', () => {
         // Buffer.concat on every chunk re-copies the whole backlog each time (quadratic).
         // Count the bytes Buffer.concat copies while 16 MB arrive.
