@@ -20,6 +20,7 @@ import { getXtermBackgroundColor } from '../helpers'
 import { generatePalette } from '../generatePalette'
 import { disposeWebglAddon } from './webglAddon'
 import { handleAltArrowWordJump } from './altArrowKeys'
+import { WebGLRendererRecovery } from './rendererRecovery'
 import './xterm.css'
 
 const COLOR_NAMES = [
@@ -48,10 +49,6 @@ function isIMETextKey (event: KeyboardEvent): boolean {
     }
     return LINUX_IME_TEXT_KEY_CODES.has(event.code) || event.code === 'Space' && event.shiftKey
 }
-
-// How many times to recreate the WebGL renderer after a lost GPU context
-// before giving up and letting xterm fall back to its DOM renderer.
-const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
 
 class FlowControl {
     private blocked = false
@@ -127,10 +124,11 @@ export class XTermFrontend extends Frontend {
     private disposed = false
     private flowControl: FlowControl
     private pinnedToBottom = true
-    private pendingRendererRecovery = false
-    private rendererRecoveryAttempts = 0
-    // Set once WebGL recovery is given up and the pane stays on xterm's DOM renderer
-    private webGLFallenBack = false
+    private rendererRecovery = new WebGLRendererRecovery({
+        attachWebGL: () => this.attachWebGLAddon(),
+        canRecover: () => this.canRecoverRenderer(),
+        redraw: () => this.redraw(),
+    })
 
     private configService: ConfigService
     private hotkeysService: HotkeysService
@@ -410,7 +408,7 @@ export class XTermFrontend extends Frontend {
         this.configureColors(profile.terminalColorScheme)
 
         if (this.enableWebGL) {
-            this.attachWebGLAddon()
+            this.rendererRecovery.init()
         }
         this.platformService.displayMetricsChanged$.pipe(
             takeUntil(this.destroyed$),
@@ -439,7 +437,7 @@ export class XTermFrontend extends Frontend {
         // retry recovery once the window is focused again and WebGL is usable.
         fromEvent(window, 'focus').pipe(
             takeUntil(this.destroyed$),
-        ).subscribe(() => this.recoverRenderer())
+        ).subscribe(() => this.rendererRecovery.recover())
 
         this.resizeHandler()
 
@@ -552,6 +550,7 @@ export class XTermFrontend extends Frontend {
             this.detach(this.element)
         }
         super.destroy()
+        this.rendererRecovery.dispose()
         disposeWebglAddon(this.webGLAddon)
         this.xterm.dispose()
     }
@@ -838,19 +837,7 @@ export class XTermFrontend extends Frontend {
      * hidden, and flushes any GPU context recovery deferred until now.
      */
     reactivate (): void {
-        // An app- or window-level GPU reset can blank the canvas without firing
-        // xterm's per-canvas contextlost event, so pendingRendererRecovery stays
-        // unset. Treat a WebGL frontend that has lost its addon as needing
-        // recovery too, so a shown-but-blank pane always gets its context back
-        // instead of relying on a manual window resize.
-        if (this.pendingRendererRecovery || this.enableWebGL && !this.webGLAddon && !this.webGLFallenBack) {
-            this.pendingRendererRecovery = true
-            this.recoverRenderer()
-        } else {
-            // The pane is shown with a live renderer, so any earlier transient
-            // losses shouldn't count against a future recovery — reset the budget
-            // to avoid permanently downgrading the pane to the DOM renderer.
-            this.rendererRecoveryAttempts = 0
+        if (!this.rendererRecovery.reactivate()) {
             this.redraw()
         }
     }
@@ -869,7 +856,6 @@ export class XTermFrontend extends Frontend {
             disposeWebglAddon(addon)
             // xterm keeps (or restores) its DOM renderer when no renderer addon is active
             console.warn('Could not initialize xterm WebGL renderer, falling back to DOM renderer', e)
-            this.webGLFallenBack = true
             return false
         }
     }
@@ -877,35 +863,11 @@ export class XTermFrontend extends Frontend {
     private onWebGLContextLoss (): void {
         disposeWebglAddon(this.webGLAddon)
         this.webGLAddon = undefined
-        this.pendingRendererRecovery = true
-        this.recoverRenderer()
-    }
-
-    /**
-     * Recreate the WebGL renderer after a lost GPU context. A new context can
-     * only be created on a visible, focused canvas, so this no-ops while the
-     * tab is hidden and is retried on reactivation or window focus.
-     */
-    private recoverRenderer (): void {
-        if (!this.pendingRendererRecovery || !this.canRecoverRenderer()) {
-            return
-        }
-        this.pendingRendererRecovery = false
-        if (this.rendererRecoveryAttempts < MAX_WEBGL_RECOVERY_ATTEMPTS) {
-            this.rendererRecoveryAttempts++
-            if (!this.attachWebGLAddon()) {
-                this.rendererRecoveryAttempts = MAX_WEBGL_RECOVERY_ATTEMPTS
-            }
-        } else {
-            // Retry budget exhausted: stay on the DOM renderer xterm restored
-            // when the lost WebGL addon was disposed
-            this.webGLFallenBack = true
-        }
-        this.redraw()
+        this.rendererRecovery.contextLost()
     }
 
     private canRecoverRenderer (): boolean {
-        return !!this.element && this.element.offsetParent !== null && document.hasFocus()
+        return this.isAttachActive() && !!this.element && this.element.offsetParent !== null && document.hasFocus()
     }
 
     private redraw (): void {
