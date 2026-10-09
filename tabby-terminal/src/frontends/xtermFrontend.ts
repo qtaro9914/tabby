@@ -15,10 +15,10 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { SerializeAddon } from '@xterm/addon-serialize'
 import { ImageAddon } from '@xterm/addon-image'
-import { CanvasAddon } from '@xterm/addon-canvas'
 import { BaseTerminalProfile } from '../api/interfaces'
 import { getXtermBackgroundColor } from '../helpers'
 import { generatePalette } from '../generatePalette'
+import { disposeWebglAddon } from './webglAddon'
 import './xterm.css'
 
 const COLOR_NAMES = [
@@ -108,7 +108,6 @@ export class XTermFrontend extends Frontend {
     private serializeAddon = new SerializeAddon()
     private ligaturesAddon?: LigaturesAddon
     private webGLAddon?: WebglAddon
-    private canvasAddon?: CanvasAddon
     private opened = false
     private resizeObserver?: any
     private hostEventHandlers?: {
@@ -129,6 +128,8 @@ export class XTermFrontend extends Frontend {
     private pinnedToBottom = true
     private pendingRendererRecovery = false
     private rendererRecoveryAttempts = 0
+    // Set once WebGL recovery is given up and the pane stays on xterm's DOM renderer
+    private webGLFallenBack = false
 
     private configService: ConfigService
     private hotkeysService: HotkeysService
@@ -153,7 +154,7 @@ export class XTermFrontend extends Frontend {
         this.xterm = new Terminal({
             allowTransparency: true,
             allowProposedApi: true,
-            overviewRulerWidth: 8,
+            overviewRuler: { width: 8 },
             windowsPty: process.platform === 'win32' ? {
                 backend: this.configService.store.terminal.useConPTY ? 'conpty' : 'winpty',
                 buildNumber: this.configService.store.terminal.useConPTY && isWindowsBuild(WIN_BUILD_BUNDLED_CONPTY_SUPPORTED)
@@ -263,9 +264,24 @@ export class XTermFrontend extends Frontend {
                 return false
             }
 
-            const handled = keyboardEventHandler('keydown', event)
+            // xterm calls this handler for keypress and keyup too, so pass the real
+            // event type - labelling them all as keydown makes the hotkey service
+            // match the same keystroke several times.
+            const handled = keyboardEventHandler(event.type, event)
             if (!handled) {
                 // a hotkey claimed the event and already cancelled it
+                return false
+            }
+
+            // xterm 6 sends Alt+Left/Right as ESC[1;3D/C, which shells don't bind by default.
+            // Keep xterm 5's word-jump sequences.
+            if (
+                event.type === 'keydown' && event.altKey && !event.ctrlKey && !event.shiftKey && !event.metaKey &&
+                (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+            ) {
+                const left = event.key === 'ArrowLeft'
+                const seq = this.hostApp.platform === Platform.macOS ? left ? '\x1bb' : '\x1bf' : left ? '\x1b[1;5D' : '\x1b[1;5C'
+                this.input.next(Buffer.from(seq, 'binary'))
                 return false
             }
 
@@ -297,7 +313,8 @@ export class XTermFrontend extends Frontend {
                     const savedViewportY = this.xterm.buffer.active.viewportY
 
                     this.fitAddon.fit()
-                    this.xtermCore.viewport._refresh()
+                    // xterm only re-syncs the scroll area when cols/rows change, not cell size
+                    this.xtermCore._viewport?.queueSync()
 
                     if (savedPinned) {
                         this.xtermCore._scrollToBottom()
@@ -400,14 +417,11 @@ export class XTermFrontend extends Frontend {
 
         if (this.enableWebGL) {
             this.attachWebGLAddon()
-        } else {
-            this.attachCanvasAddon()
         }
         this.platformService.displayMetricsChanged$.pipe(
             takeUntil(this.destroyed$),
         ).subscribe(() => {
             this.webGLAddon?.clearTextureAtlas()
-            this.canvasAddon?.clearTextureAtlas()
         })
 
         // Allow an animation frame
@@ -544,8 +558,7 @@ export class XTermFrontend extends Frontend {
             this.detach(this.element)
         }
         super.destroy()
-        this.webGLAddon?.dispose()
-        this.canvasAddon?.dispose()
+        disposeWebglAddon(this.webGLAddon)
         this.xterm.dispose()
     }
 
@@ -579,7 +592,22 @@ export class XTermFrontend extends Frontend {
     }
 
     focus (): void {
-        setTimeout(() => this.xterm.focus())
+        setTimeout(() => {
+            // Don't steal focus from modal dialogs (e.g. the SSH password prompt)
+            // or the tab's own overlay inputs - the deferred focus from a window
+            // focus event would otherwise land right after the user clicks into one
+            const active = document.activeElement
+            const tabHost = this.element?.parentElement
+            if (
+                active instanceof HTMLElement
+                && active !== this.xterm.textarea
+                && active.matches('input, textarea, select')
+                && ((tabHost?.contains(active) ?? false) || active.closest('ngb-modal-window') !== null)
+            ) {
+                return
+            }
+            this.xterm.focus()
+        })
     }
 
     async write (data: string): Promise<void> {
@@ -664,6 +692,7 @@ export class XTermFrontend extends Frontend {
             background: getXtermBackgroundColor(this.configService, this.themes, scheme),
             cursor: scheme.cursor,
             cursorAccent: scheme.cursorAccent,
+            overviewRulerBorder: '#00000000',
         }
 
         for (let i = 0; i < COLOR_NAMES.length; i++) {
@@ -700,9 +729,12 @@ export class XTermFrontend extends Frontend {
             }
         })
 
-        this.xtermCore.browser.isWindows = this.hostApp.platform === Platform.Windows
-        this.xtermCore.browser.isLinux = this.hostApp.platform === Platform.Linux
-        this.xtermCore.browser.isMac = this.hostApp.platform === Platform.macOS
+        this.xtermCore.browser = {
+            ...this.xtermCore.browser,
+            isWindows: this.hostApp.platform === Platform.Windows,
+            isLinux: this.hostApp.platform === Platform.Linux,
+            isMac: this.hostApp.platform === Platform.macOS,
+        }
 
         this.xterm.options.fontFamily = getCSSFontFamily(config)
         this.xterm.options.cursorStyle = {
@@ -817,7 +849,7 @@ export class XTermFrontend extends Frontend {
         // unset. Treat a WebGL frontend that has lost its addon as needing
         // recovery too, so a shown-but-blank pane always gets its context back
         // instead of relying on a manual window resize.
-        if (this.pendingRendererRecovery || this.enableWebGL && !this.webGLAddon && !this.canvasAddon) {
+        if (this.pendingRendererRecovery || this.enableWebGL && !this.webGLAddon && !this.webGLFallenBack) {
             this.pendingRendererRecovery = true
             this.recoverRenderer()
         } else {
@@ -837,28 +869,19 @@ export class XTermFrontend extends Frontend {
             // backgrounded app, too many live contexts).
             addon.onContextLoss(() => this.onWebGLContextLoss())
             this.xterm.loadAddon(addon)
-            this.canvasAddon?.dispose()
-            this.canvasAddon = undefined
             this.webGLAddon = addon
             return true
         } catch (e) {
-            addon?.dispose()
-            console.warn('Could not initialize xterm WebGL renderer', e)
-            this.attachCanvasAddon()
+            disposeWebglAddon(addon)
+            // xterm keeps (or restores) its DOM renderer when no renderer addon is active
+            console.warn('Could not initialize xterm WebGL renderer, falling back to DOM renderer', e)
+            this.webGLFallenBack = true
             return false
         }
     }
 
-    private attachCanvasAddon (): void {
-        if (this.canvasAddon) {
-            return
-        }
-        this.canvasAddon = new CanvasAddon()
-        this.xterm.loadAddon(this.canvasAddon)
-    }
-
     private onWebGLContextLoss (): void {
-        this.webGLAddon?.dispose()
+        disposeWebglAddon(this.webGLAddon)
         this.webGLAddon = undefined
         this.pendingRendererRecovery = true
         this.recoverRenderer()
@@ -880,7 +903,9 @@ export class XTermFrontend extends Frontend {
                 this.rendererRecoveryAttempts = MAX_WEBGL_RECOVERY_ATTEMPTS
             }
         } else {
-            this.attachCanvasAddon()
+            // Retry budget exhausted: stay on the DOM renderer xterm restored
+            // when the lost WebGL addon was disposed
+            this.webGLFallenBack = true
         }
         this.redraw()
     }
@@ -893,9 +918,8 @@ export class XTermFrontend extends Frontend {
         const renderService = this.xtermCore._renderService
         renderService?.clear()
         // handleResize() alone is a no-op when cols/rows are unchanged
-        // resizeHandler() runs a real itAddon.fit() followed
-        // by an unconditional viewport._refresh(),
-        // forcing a full repaint
+        // resizeHandler() runs a real fitAddon.fit() and an
+        // explicit _renderRows(), forcing a full repaint
         this.resizeHandler()
         renderService?.handleResize(this.xterm.cols, this.xterm.rows)
     }

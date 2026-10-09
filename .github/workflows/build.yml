@@ -31,6 +31,9 @@ jobs:
     - name: Test transfer states
       run: yarn run test:transfers
 
+    - name: Unit tests
+      run: yarn run test:unit
+
     - name: Build typings
       run: yarn run build:typings
 
