@@ -39,6 +39,10 @@ Opens a local shell tab (closing all pre-existing tabs!) and runs:
 - **S2** input: 3000 synthetic keydown/keyup pairs, measures µs/keystroke
 - **S3** tab recovery: times `saveTabs()` with 1 and 5 tabs
 
+The four extra S3b tabs are closed again at the end (the S1 tab stays open for
+the follow-up scripts), so the next launch doesn't restore them as background
+tabs.
+
 Writes `results.json` and `*.cpuprofile` files (open in Chrome DevTools →
 Performance → Load profile) to `PERF_OUT_DIR` (default: cwd).
 

@@ -167,13 +167,33 @@ async function scenarioRecovery (cdp, label) {
 async function openExtraTabs (cdp, n) {
     return await cdp.eval(`(async () => {
         const p = window.__perf
+        p.extraTabs = p.extraTabs ?? []
         for (let i = 0; i < ${n}; i++) {
             const tab = await p.profiles.openNewTabForProfile(p.localProfile)
+            p.extraTabs.push(tab)
             await new Promise(r => setTimeout(r, 1500))
             const term = tab.getAllTabs ? tab.getAllTabs()[0] : tab
             term.sendInput(${JSON.stringify(`head -n 20000 ${LOG_FILE}\n`)})
         }
         await new Promise(r => setTimeout(r, 8000))
+        return { tabs: p.app.tabs.length }
+    })()`)
+}
+
+// Close the tabs openExtraTabs() opened, keeping the window.__perf tab that
+// follow-up scripts reuse. Otherwise they're restored on the next launch as
+// background tabs, and every later harness run starts from a different state.
+async function closeExtraTabs (cdp) {
+    return await cdp.eval(`(async () => {
+        const p = window.__perf
+        const ngZone = p.injector.get(require('@angular/core').NgZone)
+        for (const tab of p.extraTabs ?? []) {
+            const wrapper = p.app.tabs.find(t => t === tab || (t.getAllTabs?.() ?? []).includes(tab))
+            if (wrapper) { try { await ngZone.run(() => p.app.closeTab(wrapper, false)) } catch {} }
+        }
+        p.extraTabs = []
+        const ours = p.app.tabs.find(t => t === p.tab || (t.getAllTabs?.() ?? []).includes(p.term))
+        if (ours) { ngZone.run(() => p.app.selectTab(ours)) }
         return { tabs: p.app.tabs.length }
     })()`)
 }
@@ -206,6 +226,8 @@ async function main () {
     console.log('S3b: opening 4 extra tabs with scrollback...')
     await openExtraTabs(cdp, 4)
     results.s3b_recovery_5tabs = await scenarioRecovery(cdp, '5tabs')
+    const closed = await closeExtraTabs(cdp)
+    console.log(`closed the extra tabs, ${closed.tabs} left`)
 
     writeFileSync(join(OUT_DIR, 'results.json'), JSON.stringify(results, null, 2))
     console.log('DONE — results written to', join(OUT_DIR, 'results.json'))

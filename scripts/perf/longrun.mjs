@@ -123,8 +123,11 @@ const setup = await renderer.eval(`(async () => {
     if (!local) { throw new Error('no local profile') }
     const before = new Set(app.tabs)
     const tab = await ngZone.run(() => profiles.openNewTabForProfile(local))
+    // tabs restored from the previous session; closing ones that were never
+    // shown used to log errors, so record how many there were
+    let closedPreexistingTabs = 0
     for (const t of [...app.tabs]) {
-        if (before.has(t)) { try { await ngZone.run(() => app.closeTab(t, false)) } catch {} }
+        if (before.has(t)) { try { await ngZone.run(() => app.closeTab(t, false)); closedPreexistingTabs++ } catch {} }
     }
     const first = tab.getAllTabs ? tab.getAllTabs()[0] : tab
     ngZone.run(() => app.selectTab(app.tabs.find(t => t === tab || (t.getAllTabs?.() ?? []).includes(first))))
@@ -160,10 +163,13 @@ const setup = await renderer.eval(`(async () => {
         return true
     }
     terms.forEach((t, i) => lr.hook(i, t.frontend.webGLAddon))
-    return terms.map(t => ({ cols: t.frontend.xterm.cols, rows: t.frontend.xterm.rows, frontend: t.frontend.constructor.name, webgl: !!t.frontend.webGLAddon }))
+    return {
+        closedPreexistingTabs,
+        panes: terms.map(t => ({ cols: t.frontend.xterm.cols, rows: t.frontend.xterm.rows, frontend: t.frontend.constructor.name, webgl: !!t.frontend.webGLAddon })),
+    }
 })()`)
-record({ event: 'start', options: { HOURS, INTERVAL, WARMUP, FPS, CHURN, COLORS, LAYOUT }, setup, electron: await main.evalNode('process.versions.electron') })
-log('started:', JSON.stringify(setup), 'out:', OUT)
+record({ event: 'start', options: { HOURS, INTERVAL, WARMUP, FPS, CHURN, COLORS, LAYOUT }, setup: setup.panes, closedPreexistingTabs: setup.closedPreexistingTabs, electron: await main.evalNode('process.versions.electron') })
+log('started:', JSON.stringify(setup.panes), 'closed pre-existing tabs:', setup.closedPreexistingTabs, 'out:', OUT)
 
 // --- sampling ----------------------------------------------------------------
 const ECHO_KEYS = 'abcdefghijklmnoprstuvwxyz0123456789' // no 'q' (quits the TUI)
