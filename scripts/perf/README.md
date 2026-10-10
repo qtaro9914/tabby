@@ -105,11 +105,12 @@ views (`Buffer.poolSize` is 64 KiB on Node 24). Requires `--inspect`.
 node scripts/perf/utf8-integrity.mjs [/tmp/utf8-test.log] [sizeMB=8]
 ```
 
-Writes a deterministic log of 2/3/4-byte UTF-8 characters, `cat`s it and
-checks that every IPC payload is valid UTF-8 on its own, that the received
-file output matches byte for byte (sha256, with the tty's `\n` → `\r\n`) and
-that the tail is rendered verbatim in xterm. Requires a prior `profiler.mjs`
-run.
+Writes a deterministic log with 1/2/3/4-byte UTF-8 characters in rotation,
+padded so that multi-byte characters start at every offset mod 4096 of the
+tty stream (both asserted before the run), `cat`s it and checks that every
+IPC payload is valid UTF-8 on its own, that the received file output matches
+byte for byte (sha256, with the tty's `\n` → `\r\n`) and that the tail is
+rendered verbatim in xterm. Requires a prior `profiler.mjs` run.
 
 ### tui-load.mjs — synthetic full-screen TUI load
 

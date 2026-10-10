@@ -8,6 +8,7 @@
 // Requires a previous profiler.mjs run (window.__perf).
 //
 //   node scripts/perf/utf8-integrity.mjs [/tmp/utf8-test.log] [sizeMB=8]
+import assert from 'assert/strict'
 import { writeFileSync } from 'fs'
 import { createHash } from 'crypto'
 import { CDP, findRendererTarget, sleep } from './cdp.mjs'
@@ -15,31 +16,68 @@ import { CDP, findRendererTarget, sleep } from './cdp.mjs'
 const FILE = process.argv[2] ?? '/tmp/utf8-test.log'
 const sizeMB = parseInt(process.argv[3] ?? '8')
 
-// deterministic generator: ASCII + 2-byte (é ñ Ж) + 3-byte (日本語) + 4-byte (emoji)
-let seed = 7
-const rand = n => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n }
-const pools = [
-    'abcdefghijklmnopqrstuvwxyz0123456789 ',
-    'éñüßЖЯλΩ',
-    'ログ出力の文字化け検証日本語漢字かなカナ処理完了接続端末転送',
-    '😀🚀🎉👍🔥✅',
-]
+// Deterministic content (no PRNG - a previous LCG overflowed double precision
+// and never produced 3/4-byte characters). Characters of every UTF-8 width
+// (1/2/3/4 bytes) take turns, each preceded by 0..PADDING-1 ASCII bytes, so
+// multi-byte characters start at every byte offset modulo BOUNDARY_PERIOD in
+// the stream main splits (the tty output, with \n -> \r\n): a read boundary
+// at any offset mod BOUNDARY_PERIOD (reads here are ~4095 bytes) falls inside
+// characters of every width at every inner position somewhere in the file.
+// Both properties are asserted below, not assumed.
+const CHARS = {
+    1: [...'abcdefghijklmnopqrstuvwxyz0123456789'],
+    2: [...'éñüßЖЯλΩ'],
+    3: [...'ログ出力の文字化け検証日本語漢字かなカナ処理完了接続端末転送'],
+    4: [...'😀🚀🎉👍🔥🦀🧪🌏'],
+}
+const WIDTHS = [1, 2, 3, 4]
+const PADDING = 5
+const UNITS_PER_LINE = 24
+const BOUNDARY_PERIOD = 4096
+for (const w of WIDTHS) {
+    for (const c of CHARS[w]) {
+        assert.equal(Buffer.byteLength(c), w, `${c} is not a ${w}-byte character`)
+    }
+}
+
 const lines = []
+const charCount = { 1: 0, 2: 0, 3: 0, 4: 0 }
+// for each multi-byte width: which offsets (mod BOUNDARY_PERIOD) a character starts at
+const startOffsets = { 2: new Uint8Array(BOUNDARY_PERIOD), 3: new Uint8Array(BOUNDARY_PERIOD), 4: new Uint8Array(BOUNDARY_PERIOD) }
 let size = 0
+let streamOffset = 0
+let unit = 0
 for (let i = 0; size < sizeMB * 1048576; i++) {
     let s = `${String(i).padStart(7, '0')} `
-    for (let j = 0; j < 24; j++) {
-        const pool = [...pools[rand(pools.length)]]
-        s += pool[rand(pool.length)]
+    for (let j = 0; j < UNITS_PER_LINE; j++, unit++) {
+        s += '.'.repeat(unit % PADDING)
+        const w = WIDTHS[unit % WIDTHS.length]
+        const c = CHARS[w][Math.floor(unit / WIDTHS.length) % CHARS[w].length]
+        if (w > 1) {
+            startOffsets[w][(streamOffset + Buffer.byteLength(s)) % BOUNDARY_PERIOD] = 1
+        }
+        charCount[w]++
+        s += c
     }
     lines.push(s)
     size += Buffer.byteLength(s) + 1
+    streamOffset += Buffer.byteLength(s) + 2
+}
+const boundaryCoverage = {}
+for (const w of [2, 3, 4]) {
+    const covered = startOffsets[w].reduce((a, b) => a + b, 0)
+    boundaryCoverage[w] = `${covered}/${BOUNDARY_PERIOD}`
+    assert.equal(covered, BOUNDARY_PERIOD, `${w}-byte characters don't start at every offset mod ${BOUNDARY_PERIOD}`)
+}
+for (const w of WIDTHS) {
+    assert.ok(charCount[w] > 0, `no ${w}-byte characters generated`)
 }
 const content = lines.join('\n') + '\n'
 writeFileSync(FILE, content)
 const expected = Buffer.from(content.replace(/\n/g, '\r\n'))
 const expectedSha = createHash('sha256').update(expected).digest('hex')
 console.log(`wrote ${lines.length} lines, ${Buffer.byteLength(content)} bytes to ${FILE}`)
+console.log(`characters by UTF-8 width: ${JSON.stringify(charCount)}, start offsets covered mod ${BOUNDARY_PERIOD}: ${JSON.stringify(boundaryCoverage)}`)
 
 const cdp = await CDP.connect((await findRendererTarget()).webSocketDebuggerUrl)
 await cdp.send('Runtime.enable')
