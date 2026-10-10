@@ -253,6 +253,9 @@ const RENDERER_SAMPLE = keys => `(async () => {
         tab.webglRecreated = lr.webglRecreated[i]
         tab.contextLosses = lr.contextLosses[i].length
         tab.lastContextLoss = lr.contextLosses[i].length ? new Date(lr.contextLosses[i].at(-1)).toISOString() : null
+        // WebGLRendererRecovery state (xterm 6 builds; absent before)
+        const rec = fe.rendererRecovery
+        tab.recovery = rec ? { active: rec.webGLActive, pending: rec.recoveryPending, attempts: rec.recoveryAttempts, fallenBackToDOM: rec.fallenBackToDOM } : null
         const atlas = addon?._renderer?._charAtlas
         if (atlas) {
             const countGlyphs = (o, depth = 0) => {
@@ -367,6 +370,8 @@ function flatten (s) {
         put(`tab${t.i}.atlasGlyphs`, t.atlas?.glyphs)
         put(`tab${t.i}.webglRecreated`, t.webglRecreated)
         put(`tab${t.i}.contextLosses`, t.contextLosses)
+        put(`tab${t.i}.recoveryAttempts`, t.recovery?.attempts)
+        put(`tab${t.i}.fallenBackToDOM`, t.recovery ? +t.recovery.fallenBackToDOM : undefined)
     }
     return m
 }
