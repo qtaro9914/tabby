@@ -119,7 +119,7 @@ describe('WebGLRendererRecovery', () => {
         assert.equal(recovery.recoveryAttempts, 0)
     })
 
-    it('recovers a renderer lost without a context loss event when shown', () => {
+    it('runs a pending recovery when the pane is shown again', () => {
         const { host, recovery } = setup()
         host.canRecoverNow = false
         recovery.init()
