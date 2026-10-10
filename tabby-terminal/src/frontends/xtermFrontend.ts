@@ -126,6 +126,7 @@ export class XTermFrontend extends Frontend {
     private pinnedToBottom = true
     private rendererRecovery = new WebGLRendererRecovery({
         attachWebGL: () => this.attachWebGLAddon(),
+        webGLRendererAlive: () => this.isWebGLRendererAlive(),
         canRecover: () => this.canRecoverRenderer(),
         redraw: () => this.redraw(),
     })
@@ -843,12 +844,20 @@ export class XTermFrontend extends Frontend {
     }
 
     private attachWebGLAddon (): boolean {
+        // a renderer that lost its context without telling xterm
+        disposeWebglAddon(this.webGLAddon)
+        this.webGLAddon = undefined
         let addon: WebglAddon|undefined = undefined
         try {
             addon = new WebglAddon()
             // xterm fires this when the GPU drops the canvas context (driver reset,
-            // backgrounded app, too many live contexts).
-            addon.onContextLoss(() => this.onWebGLContextLoss())
+            // backgrounded app, too many live contexts). Ignore it from an addon
+            // that has already been replaced.
+            addon.onContextLoss(() => {
+                if (addon === this.webGLAddon) {
+                    this.onWebGLContextLoss()
+                }
+            })
             this.xterm.loadAddon(addon)
             this.webGLAddon = addon
             return true
@@ -864,6 +873,17 @@ export class XTermFrontend extends Frontend {
         disposeWebglAddon(this.webGLAddon)
         this.webGLAddon = undefined
         this.rendererRecovery.contextLost()
+    }
+
+    private isWebGLRendererAlive (): boolean {
+        const renderer = (this.webGLAddon as any)?._renderer
+        const canvas: HTMLCanvasElement|undefined = renderer?._canvas
+        const gl: WebGL2RenderingContext|undefined = renderer?._gl
+        if (!canvas || !gl) {
+            // can't tell without the addon's internals - don't recreate it on a guess
+            return !!this.webGLAddon
+        }
+        return canvas.isConnected && !gl.isContextLost()
     }
 
     private canRecoverRenderer (): boolean {

@@ -8,9 +8,13 @@ class FakeHost {
     attachCalls = 0
     liveAddons = 0
     redraws = 0
+    canvasAlive = true
 
     attachWebGL (): boolean {
         this.attachCalls++
+        // like the frontend, dispose a stale addon before loading a new one
+        this.liveAddons = 0
+        this.canvasAlive = true
         if (!this.webGLWorks) {
             return false
         }
@@ -19,6 +23,7 @@ class FakeHost {
     }
 
     canRecover (): boolean { return this.canRecoverNow }
+    webGLRendererAlive (): boolean { return this.liveAddons > 0 && this.canvasAlive }
     redraw (): void { this.redraws++ }
 
     /** The GPU dropped the context: the frontend disposes the addon and reports it */
@@ -128,6 +133,31 @@ describe('WebGLRendererRecovery', () => {
         assert.equal(recovery.reactivate(), true)
         assert.equal(recovery.webGLActive, true)
         assert.equal(host.redraws, 1)
+    })
+
+    it('recovers a renderer whose canvas went blank without a context loss event when shown', () => {
+        const { host, recovery } = setup()
+        recovery.init()
+        // a GPU reset drops the context without contextlost reaching xterm:
+        // the addon is still loaded, contextLost() is never called
+        host.canvasAlive = false
+        assert.equal(recovery.webGLActive, true)
+        recovery.recover()   // window focus alone doesn't notice
+        assert.equal(host.attachCalls, 1)
+        host.canRecoverNow = false
+        assert.equal(recovery.reactivate(), true)
+        assert.equal(recovery.webGLActive, false)
+        assert.equal(recovery.recoveryPending, true, 'the blank renderer was not noticed')
+        host.canRecoverNow = true
+        recovery.recover()
+        assert.equal(host.attachCalls, 2)
+        assert.equal(host.liveAddons, 1, 'the stale addon was not replaced')
+        assert.equal(recovery.webGLActive, true)
+        assert.equal(recovery.recoveryAttempts, 1)
+        assert.equal(host.redraws, 1)
+        // shown again with the new renderer: nothing to recover
+        assert.equal(recovery.reactivate(), false)
+        assert.equal(host.attachCalls, 2)
     })
 
     it('does nothing once disposed', () => {

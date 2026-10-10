@@ -3,8 +3,10 @@
 export const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
 
 export interface WebGLRendererRecoveryHost {
-    /** Load a new WebGL addon; false if WebGL couldn't be initialized */
+    /** Load a new WebGL addon, disposing a stale one first; false if WebGL couldn't be initialized */
     attachWebGL: () => boolean
+    /** Whether the loaded WebGL renderer still has its canvas and GPU context */
+    webGLRendererAlive: () => boolean
     /** Whether a new GPU context can be created now (terminal open, visible and focused) */
     canRecover: () => boolean
     redraw: () => void
@@ -64,9 +66,12 @@ export class WebGLRendererRecovery {
             return false
         }
         // An app- or window-level GPU reset can blank the canvas without firing
-        // xterm's per-canvas contextlost event. Treat a lost renderer as needing
-        // recovery too, so a shown-but-blank pane always gets its context back
-        // instead of relying on a manual window resize.
+        // xterm's per-canvas contextlost event. Treat a renderer that has lost its
+        // canvas or context as lost too, so a shown-but-blank pane always gets its
+        // context back instead of relying on a manual window resize.
+        if (this.active && !this.host.webGLRendererAlive()) {
+            this.active = false
+        }
         if (this.pending || !this.active) {
             this.pending = true
             this.recover()
