@@ -1,4 +1,4 @@
-import { Observable, Subject, first, auditTime, debounce, interval } from 'rxjs'
+import { Observable, Subject, take, auditTime, debounce, interval } from 'rxjs'
 import { Spinner } from 'cli-spinner'
 import colors from 'ansi-colors'
 import { NgZone, OnInit, OnDestroy, Injector, ViewChild, HostBinding, Input, ElementRef, InjectFlags, Component } from '@angular/core'
@@ -383,7 +383,10 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         ) ? XTermWebGLFrontend : XTermFrontend
         this.frontend = new cls(this.injector)
 
-        this.frontend.resize$.pipe(first()).subscribe(({ columns, rows }) => {
+        // take(1), not first(): a tab closed before it was ever shown (e.g. a
+        // restored background tab) completes resize$ and focused$ without a
+        // value, and first() would then error with an unhandled EmptyError
+        this.frontend.resize$.pipe(take(1)).subscribe(({ columns, rows }) => {
             void this.initializeFrontend(columns, rows).catch(error => {
                 this.logger.error('Terminal frontend initialization failed', error)
             })
@@ -398,7 +401,7 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
                 await this.frontend?.attach(this.content.nativeElement, this.profile)
                 this.frontend?.configure(this.profile)
             } else {
-                this.focused$.pipe(first()).subscribe(async () => {
+                this.focused$.pipe(take(1)).subscribe(async () => {
                     await this.frontend?.attach(this.content.nativeElement, this.profile)
                     this.frontend?.configure(this.profile)
                 })
