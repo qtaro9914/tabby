@@ -124,10 +124,16 @@ const setup = await renderer.eval(`(async () => {
     const before = new Set(app.tabs)
     const tab = await ngZone.run(() => profiles.openNewTabForProfile(local))
     // tabs restored from the previous session; closing ones that were never
-    // shown used to log errors, so record how many there were
+    // shown used to log errors, so record how many there were. The Welcome tab
+    // opens on every launch (enableWelcomeTab) and is never restored, so it's
+    // closed but not counted
     let closedPreexistingTabs = 0
     for (const t of [...app.tabs]) {
-        if (before.has(t)) { try { await ngZone.run(() => app.closeTab(t, false)); closedPreexistingTabs++ } catch {} }
+        if (!before.has(t)) { continue }
+        try {
+            await ngZone.run(() => app.closeTab(t, false))
+            if (t.constructor.name !== 'WelcomeTabComponent') { closedPreexistingTabs++ }
+        } catch {}
     }
     const first = tab.getAllTabs ? tab.getAllTabs()[0] : tab
     ngZone.run(() => app.selectTab(app.tabs.find(t => t === tab || (t.getAllTabs?.() ?? []).includes(first))))
