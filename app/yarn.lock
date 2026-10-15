@@ -1707,9 +1707,9 @@ readable-stream@^3.1.1, readable-stream@^3.4.0:
     string_decoder "^1.1.1"
     util-deprecate "^1.0.1"
 
-"russh@https://github.com/qtaro9914/russh-napi/releases/download/v0.1.38-rw.0/russh-0.1.38-rw.0%2B0.60.1.tgz":
-  version "0.1.38-rw.0"
-  resolved "https://github.com/qtaro9914/russh-napi/releases/download/v0.1.38-rw.0/russh-0.1.38-rw.0%2B0.60.1.tgz#5c532a126aa91a149fc4a9ca1562e8724312f3f7"
+"russh@https://github.com/qtaro9914/russh-napi/releases/download/v0.1.38-rw.1/russh-0.1.38-rw.1%2B0.60.1.tgz":
+  version "0.1.38-rw.1"
+  resolved "https://github.com/qtaro9914/russh-napi/releases/download/v0.1.38-rw.1/russh-0.1.38-rw.1%2B0.60.1.tgz#91de2ad6c2978cf906d229c88cec354cad479bde"
   dependencies:
     "@napi-rs/cli" "^2.18.3"
 
