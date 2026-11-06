@@ -83,6 +83,18 @@ div.mt-4
 
     .form-line
         .header
+            .title(translate) Wheel reports per scroll step
+            .description(translate) How many wheel events apps with mouse support (tmux, herdr, vim) receive per notch. Ghostty sends 3.
+        input.form-control(
+            type='number',
+            min='1',
+            max='10',
+            [(ngModel)]='config.store.terminal.mouseWheelReports',
+            (ngModelChange)='config.save()',
+        )
+
+    .form-line
+        .header
             .title(translate) Paste on middle-click
 
         toggle(

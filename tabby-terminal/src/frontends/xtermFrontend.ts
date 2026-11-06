@@ -20,6 +20,7 @@ import { getXtermBackgroundColor } from '../helpers'
 import { generatePalette } from '../generatePalette'
 import { disposeWebglAddon } from './webglAddon'
 import { handleAltArrowWordJump } from './altArrowKeys'
+import { repeatWheelReports, scrollToBottomIfNeeded } from './scrolling'
 import { WebGLRendererRecovery } from './rendererRecovery'
 import './xterm.css'
 
@@ -99,6 +100,7 @@ export class XTermFrontend extends Frontend {
     private resizeHandler: () => void
     private configuredTheme: ITheme = {}
     private copyOnSelect = false
+    private wheelReports = 1
     private preventNextOnSelectionChangeEvent = false
     private search = new SearchAddon()
     private searchState: SearchState = { resultCount: 0 }
@@ -288,8 +290,9 @@ export class XTermFrontend extends Frontend {
             return handled
         })
 
-        this.xtermCore._scrollToBottom = this.xtermCore.scrollToBottom.bind(this.xtermCore)
+        this.xtermCore._scrollToBottom = scrollToBottomIfNeeded(this.xtermCore, this.xtermCore.scrollToBottom.bind(this.xtermCore))
         this.xtermCore.scrollToBottom = () => null
+        repeatWheelReports(this.xtermCore.coreMouseService, this.xtermCore.coreService, () => this.wheelReports)
 
         // NOTE: xterm.onScroll only fires for content-driven scroll (new lines),
         // NOT for user wheel/keyboard scroll (xterm.js #3864, #3201). During
@@ -747,6 +750,7 @@ export class XTermFrontend extends Frontend {
         this.setFontSize()
 
         this.copyOnSelect = config.terminal.copyOnSelect
+        this.wheelReports = config.terminal.mouseWheelReports
 
         this.configureColors(profile.terminalColorScheme)
 
