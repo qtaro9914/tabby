@@ -36,6 +36,7 @@ function mergeEnv (...envs) {
 
 /** @hidden */
 export class Session extends BaseSession {
+    private pendingOutput = new Set<Promise<void>>()
     private pty: PTYProxy|null = null
     private ptyClosed = false
     private pauseAfterExit = false
@@ -62,6 +63,12 @@ export class Session extends BaseSession {
         if (options.restoreFromPTYID) {
             pty = await this.ptyInterface.restore(options.restoreFromPTYID)
             options.restoreFromPTYID = null
+        }
+
+        if (this.isDestroyed) {
+            pty?.unsubscribeAll()
+            await pty?.kill()
+            return
         }
 
         if (!pty) {
@@ -140,6 +147,13 @@ export class Session extends BaseSession {
             this.guessedCWD = cwd ?? null
         }
 
+        // Destruction can happen while PTY acquisition is pending.
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        if (this.isDestroyed) {
+            pty.unsubscribeAll()
+            await pty.kill()
+            return
+        }
         this.pty = pty
 
         pty.getTruePID().then(async () => {
@@ -149,34 +163,48 @@ export class Session extends BaseSession {
         this.open = true
 
         this.pty.subscribe('data', (array: Uint8Array) => {
-            this.pty!.ackData(array.length)
             const data = Buffer.from(array)
-            this.emitOutput(data)
+            const output = this.emitOutput(data).then(() => {
+                if (!this.isDestroyed && this.pty === pty) {
+                    pty?.ackData(array.length)
+                }
+            }).catch(error => {
+                this.logger.warn('Could not consume PTY output', error)
+                void this.destroy()
+            })
+            this.pendingOutput.add(output)
+            void output.then(() => this.pendingOutput.delete(output))
             if (this.hostApp.platform === Platform.Windows) {
                 this.guessWindowsCWD(data.toString())
             }
         })
 
         this.pty.subscribe('exit', () => {
-            if (this.pauseAfterExit) {
-                return
-            } else if (this.open) {
-                this.destroy()
-            }
+            void this.finishOutput(false)
         })
 
         this.pty.subscribe('close', () => {
             this.ptyClosed = true
-            if (this.pauseAfterExit) {
-                this.emitOutput(Buffer.from('\r\nPress any key to close\r\n'))
-            } else if (this.open) {
-                this.destroy()
-            }
+            void this.finishOutput(true)
         })
 
         this.pauseAfterExit = options.pauseAfterExit
 
         this.destroyed$.subscribe(() => this.pty!.unsubscribeAll())
+    }
+
+    private async finishOutput (showPrompt: boolean): Promise<void> {
+        await Promise.all([...this.pendingOutput])
+        if (this.isDestroyed) {
+            return
+        }
+        if (this.pauseAfterExit) {
+            if (showPrompt) {
+                await this.emitOutput(Buffer.from('\r\nPress any key to close\r\n'))
+            }
+        } else if (this.open) {
+            await this.destroy()
+        }
     }
 
     getID (): string|null {

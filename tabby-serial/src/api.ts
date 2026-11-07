@@ -72,8 +72,15 @@ export class SerialSession extends BaseSession {
     }
 
     async start (): Promise<void> {
+        if (this.isDestroyed) {
+            return
+        }
         if (!this.profile.options.port) {
             this.profile.options.port = (await this.serialService.listPorts())[0].name
+        }
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        if (this.isDestroyed) {
+            return
         }
 
         const serial = this.serial = new SerialPortStream({
@@ -118,8 +125,20 @@ export class SerialSession extends BaseSession {
             }
         })
 
+        // The tab may have closed while the native port was opening.
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        if (this.isDestroyed) {
+            if (serial.isOpen) {
+                serial.close()
+            }
+            return
+        }
         this.open = true
-        setTimeout(() => this.streamProcessor.start())
+        setTimeout(() => {
+            if (!this.isDestroyed) {
+                this.streamProcessor.start()
+            }
+        })
 
         serial.on('readable', () => {
             this.emitOutput(serial.read())

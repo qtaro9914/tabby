@@ -62,7 +62,7 @@ export class TelnetSession extends BaseSession {
     get serviceMessage$ (): Observable<string> { return this.serviceMessage }
 
     private serviceMessage = new Subject<string>()
-    private socket: Socket
+    private socket?: Socket
     private streamProcessor: TerminalStreamProcessor
     private telnetProtocol = false
     private lastWidth = 0
@@ -82,24 +82,36 @@ export class TelnetSession extends BaseSession {
     }
 
     async start (): Promise<void> {
-        this.socket = new Socket()
+        if (this.isDestroyed) {
+            return
+        }
+        const socket = this.socket = new Socket()
         this.emitServiceMessage(`Connecting to ${this.profile.options.host}`)
 
         return new Promise((resolve, reject) => {
-            this.socket.on('error', err => {
+            socket.on('error', err => {
                 this.emitServiceMessage(colors.bgRed.black(' X ') + ` Socket error: ${err as any}`)
                 reject(err)
                 this.destroy()
             })
-            this.socket.on('close', () => {
+            socket.on('close', () => {
                 this.emitServiceMessage('Connection closed')
                 this.destroy()
             })
-            this.socket.on('data', data => this.onData(data))
-            this.socket.connect(this.profile.options.port ?? 23, this.profile.options.host, () => {
+            socket.on('data', data => this.onData(data))
+            socket.connect(this.profile.options.port ?? 23, this.profile.options.host, () => {
+                if (this.isDestroyed) {
+                    socket.destroy()
+                    resolve()
+                    return
+                }
                 this.emitServiceMessage('Connected')
                 this.open = true
-                setTimeout(() => this.streamProcessor.start())
+                setTimeout(() => {
+                    if (!this.isDestroyed) {
+                        this.streamProcessor.start()
+                    }
+                })
                 this.loginScriptProcessor?.executeUnconditionalScripts()
                 resolve()
             })
@@ -132,12 +144,12 @@ export class TelnetSession extends BaseSession {
 
     emitTelnet (command: TelnetCommands, option: TelnetOptions): void {
         this.logger.debug('>', TelnetCommands[command], TelnetOptions[option] || option)
-        this.socket.write(Buffer.from([TelnetCommands.IAC, command, option]))
+        this.socket?.write(Buffer.from([TelnetCommands.IAC, command, option]))
     }
 
     emitTelnetSuboption (option: TelnetOptions, value: Buffer): void {
         this.logger.debug('>', 'SUBOPTION', TelnetOptions[option], value)
-        this.socket.write(Buffer.from([
+        this.socket?.write(Buffer.from([
             TelnetCommands.IAC,
             TelnetCommands.SUBOPTION,
             option,
@@ -264,11 +276,11 @@ export class TelnetSession extends BaseSession {
     }
 
     write (data: Buffer): void {
-        this.socket.write(data)
+        this.socket?.write(data)
     }
 
     kill (_signal?: string): void {
-        this.socket.destroy()
+        this.socket?.destroy()
     }
 
     async destroy (): Promise<void> {

@@ -1,5 +1,5 @@
 import deepEqual from 'deep-equal'
-import { BehaviorSubject, filter, firstValueFrom, fromEvent, takeUntil } from 'rxjs'
+import { filter, fromEvent, takeUntil } from 'rxjs'
 import { Injector, NgZone } from '@angular/core'
 import {
     ConfigService, getCSSFontFamily, getWindows10Build, HostAppService, HotkeysService, isWindowsBuild,
@@ -22,6 +22,7 @@ import { disposeWebglAddon } from './webglAddon'
 import { handleAltArrowWordJump } from './altArrowKeys'
 import { repeatWheelReports, scrollToBottomIfNeeded } from './scrolling'
 import { WebGLRendererRecovery } from './rendererRecovery'
+import { TerminalWriteCompletion } from './writeCompletion'
 import './xterm.css'
 
 const COLOR_NAMES = [
@@ -49,42 +50,6 @@ function isIMETextKey (event: KeyboardEvent): boolean {
         return false
     }
     return LINUX_IME_TEXT_KEY_CODES.has(event.code) || event.code === 'Space' && event.shiftKey
-}
-
-class FlowControl {
-    private blocked = false
-    private blocked$ = new BehaviorSubject<boolean>(false)
-    private pendingCallbacks = 0
-    private lowWatermark = 5
-    private highWatermark = 10
-    private bytesWritten = 0
-    private bytesThreshold = 1024 * 128
-
-    constructor (private xterm: Terminal) { }
-
-    async write (data: string) {
-        if (this.blocked) {
-            await firstValueFrom(this.blocked$.pipe(filter(x => !x)))
-        }
-        this.bytesWritten += data.length
-        if (this.bytesWritten > this.bytesThreshold) {
-            this.pendingCallbacks++
-            this.bytesWritten = 0
-            if (!this.blocked && this.pendingCallbacks > this.highWatermark) {
-                this.blocked = true
-                this.blocked$.next(true)
-            }
-            this.xterm.write(data, () => {
-                this.pendingCallbacks--
-                if (this.blocked && this.pendingCallbacks < this.lowWatermark) {
-                    this.blocked = false
-                    this.blocked$.next(false)
-                }
-            })
-        } else {
-            this.xterm.write(data)
-        }
-    }
 }
 
 /** @hidden */
@@ -124,7 +89,7 @@ export class XTermFrontend extends Frontend {
     private resizeAnimationFrame?: number
     private resizePending = false
     private disposed = false
-    private flowControl: FlowControl
+    private flowControl: TerminalWriteCompletion
     private pinnedToBottom = true
     private rendererRecovery = new WebGLRendererRecovery({
         attachWebGL: () => this.attachWebGLAddon(),
@@ -164,7 +129,7 @@ export class XTermFrontend extends Frontend {
                     : getWindows10Build(),
             } : undefined,
         })
-        this.flowControl = new FlowControl(this.xterm)
+        this.flowControl = new TerminalWriteCompletion(this.xterm)
         this.xtermCore = this.xterm['_core']
 
         // xterm.js#6054 does this in _keyDown itself. Keep the workaround at
@@ -556,6 +521,7 @@ export class XTermFrontend extends Frontend {
         super.destroy()
         this.rendererRecovery.dispose()
         disposeWebglAddon(this.webGLAddon)
+        this.flowControl.dispose()
         this.xterm.dispose()
     }
 
@@ -613,7 +579,9 @@ export class XTermFrontend extends Frontend {
         // could change pinnedToBottom mid-write.
         const wasPinned = this.pinnedToBottom
         const savedViewportY = this.xterm.buffer.active.viewportY
-        await this.flowControl.write(data)
+        if (!await this.flowControl.write(data)) {
+            return
+        }
         if (wasPinned) {
             this.xtermCore._scrollToBottom()
         } else {

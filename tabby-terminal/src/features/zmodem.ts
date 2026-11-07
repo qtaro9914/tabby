@@ -1,6 +1,6 @@
 import colors from 'ansi-colors'
 import * as ZModem from 'zmodem.js'
-import { Observable, filter, first } from 'rxjs'
+import { Observable, Subscription, filter } from 'rxjs'
 import { EnvironmentInjector, inject, Injectable } from '@angular/core'
 import { TerminalDecorator } from '../api/decorator'
 import { BaseTerminalTabComponent } from '../api/baseTerminalTab.component'
@@ -270,11 +270,22 @@ class ZModemMiddleware extends SessionMiddleware {
         }
 
         let canceled = false
-        const cancelSubscription = this.cancelEvent.subscribe(() => {
-            try {
-                zsession._skip()
-            } catch {}
-            canceled = true
+        const cancelSubscription = new Subscription()
+        const cancellation = new Promise<void>((resolve, reject) => {
+            cancelSubscription.add(this.cancelEvent.subscribe({
+                next: () => {
+                    try {
+                        zsession._skip()
+                    } catch {}
+                    canceled = true
+                    resolve()
+                },
+                complete: () => {
+                    canceled = true
+                    resolve()
+                },
+                error: reject,
+            }))
         })
 
         let writeQueue: Promise<void> = Promise.resolve()
@@ -315,7 +326,7 @@ class ZModemMiddleware extends SessionMiddleware {
                         })
                     },
                 }),
-                this.cancelEvent.pipe(first()).toPromise(),
+                cancellation,
             ])
 
             await writeQueue

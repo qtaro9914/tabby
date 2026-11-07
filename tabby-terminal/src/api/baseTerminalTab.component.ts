@@ -455,6 +455,9 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         } catch (error) {
             this.logger.warn('Could not restore terminal frontend state', error)
         }
+        if (this.isDestroyed) {
+            return
+        }
         this.frontendReady.next()
         this.frontendReady.complete()
 
@@ -527,12 +530,28 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
      * Feeds input into the terminal frontend
      */
     async write (data: string): Promise<void> {
-        const write = this.frontendWriteLock.then(() =>
-            this.withSpinnerPaused(() => this.writeRaw(data)))
-        this.frontendWriteLock = write.catch(e => {
-            this.logger.warn('Terminal frontend write failed', e)
+        if (this.isDestroyed) {
+            return
+        }
+        const write = this.frontendWriteLock.then(async () => {
+            if (!this.isDestroyed) {
+                await this.withSpinnerPaused(() => this.writeRaw(data))
+            }
         })
-        await write
+        this.frontendWriteLock = write.catch(e => {
+            if (!this.isDestroyed) {
+                this.logger.warn('Terminal frontend write failed', e)
+            }
+        })
+        try {
+            await write
+        } catch (error) {
+            // Other frontend implementations may reject during disposal.
+            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+            if (!this.isDestroyed) {
+                throw error
+            }
+        }
     }
 
     protected async writeRaw (data: string): Promise<void> {
@@ -651,6 +670,12 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
     }
 
     async destroy (): Promise<void> {
+        if (this.isDestroyed) {
+            return
+        }
+        this._isDestroyed = true
+        const session = this.session
+        this.setSession(null)
         this.frontend?.detach(this.content.nativeElement)
         this.frontend?.destroy()
         this.frontend = undefined
@@ -666,11 +691,12 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         this.output.complete()
         this.binaryOutput.complete()
         this.frontendReady.complete()
+        this.sessionChanged.complete()
+        this.toolbarRevealTimeout.clear()
+        this.stopSpinner()
 
         super.destroy()
-        if (this.session?.open) {
-            await this.session.destroy()
-        }
+        await session?.destroy()
     }
 
     protected detachTermContainerHandlers (): void {
@@ -793,6 +819,10 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
     }
 
     setSession (session: BaseSession|null, destroyOnSessionClose = false): void {
+        if (session && this.isDestroyed) {
+            void session.destroy()
+            return
+        }
         if (session) {
             if (this.session) {
                 this.setSession(null)
@@ -834,11 +864,15 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
             throw new Error('Session not set')
         }
 
-        // this.session.output$.bufferTime(10).subscribe((datas) => {
+        const session = this.session
         this.attachSessionHandler(this.session.output$, data => {
             if (this.enablePassthrough) {
                 this.output.next(data)
-                void this.write(data).catch(() => undefined)
+                session.trackOutputConsumption(this.write(data).catch(async () => {
+                    // A failed sink must close its producer instead of granting
+                    // more receive credit for output that was never consumed.
+                    await session.destroy().catch(error => this.logger.warn('Could not stop failed output', error))
+                }))
             }
         })
 

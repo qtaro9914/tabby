@@ -17,6 +17,8 @@ export abstract class ConnectableTerminalTabComponent<P extends ConnectableTermi
 
     protected reconnectOffered = false
     protected isDisconnectedByHand = false
+    private reconnecting = false
+    private reconnectRequested = false
 
     constructor (protected injector: Injector) {
         super(injector)
@@ -46,9 +48,7 @@ export abstract class ConnectableTerminalTabComponent<P extends ConnectableTermi
     }
 
     protected async onFrontendReady (): Promise<void> {
-        const initialization = this.initializeSession().then(() => {
-            this.clearServiceMessagesOnConnect()
-        })
+        const initialization = this.reconnect()
         await Promise.all([super.onFrontendReady(), initialization])
     }
 
@@ -67,7 +67,11 @@ export abstract class ConnectableTerminalTabComponent<P extends ConnectableTermi
     protected onSessionDestroyed (): void {
         super.onSessionDestroyed()
 
-        if (this.frontend) {
+        if (this.reconnecting) {
+            this.reconnectRequested = this.profile.behaviorOnSessionEnd === 'reconnect' && !this.isDisconnectedByHand
+            return
+        }
+        if (this.frontend && !this.isDestroyed) {
             this.frontend.resetTerminalModes()
             if (this.profile.behaviorOnSessionEnd === 'reconnect' && !this.isDisconnectedByHand) {
                 this.reconnect()
@@ -118,12 +122,37 @@ export abstract class ConnectableTerminalTabComponent<P extends ConnectableTermi
     }
 
     async reconnect (): Promise<void> {
-        this.session?.destroy()
-        this.frontend?.resetTerminalModes()
-        this.profile = this.injector.get(ProfilesService).refreshConfigProxyForProfile(this.profile)
-        await this.initializeSession()
-        this.clearServiceMessagesOnConnect()
-        this.session?.releaseInitialDataBuffer()
+        if (this.reconnecting || this.isDestroyed) {
+            return
+        }
+        this.reconnecting = true
+        try {
+            const session = this.session
+            this.setSession(null)
+            await session?.destroy()
+            // Destruction can run while the asynchronous teardown is pending.
+            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+            if (this.isDestroyed) {
+                return
+            }
+            this.frontend?.resetTerminalModes()
+            this.profile = this.injector.get(ProfilesService).refreshConfigProxyForProfile(this.profile)
+            await this.initializeSession()
+            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+            if (!this.isDestroyed) {
+                this.clearServiceMessagesOnConnect()
+                this.session?.releaseInitialDataBuffer()
+            }
+        } finally {
+            this.reconnecting = false
+            if (this.reconnectRequested) {
+                this.reconnectRequested = false
+                // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+                if (!this.isDestroyed && !this.isDisconnectedByHand) {
+                    void this.reconnect()
+                }
+            }
+        }
     }
 
     private clearServiceMessagesOnConnect (): void {

@@ -139,9 +139,10 @@ export class PTY {
 
     constructor (private id: string, private app: Application, ...args: any[]) {
         this.pty = (nodePTY as any).spawn(...args)
-        for (const key of ['close', 'exit']) {
-            (this.pty as any).on(key, (...eventArgs) => this.emit(key, ...eventArgs))
-        }
+        const legacyPTY = this.pty as any
+        legacyPTY.on('close', (...eventArgs) => {
+            setImmediate(() => this.emit('close', ...eventArgs))
+        })
 
         this.outputQueue = new PTYDataQueue(this.pty, data => {
             const payload = toUnpooledBuffer(data)
@@ -149,9 +150,11 @@ export class PTY {
         })
 
         this.pty.onData(data => this.outputQueue.push(Buffer.from(data)))
-        this.pty.onExit(() => {
+        this.pty.onExit(event => {
             this.exited = true
             this.outputQueue.dispose()
+            // Flush queued data before notifying the renderer of process exit.
+            setImmediate(() => this.emit('exit', event.exitCode, event.signal))
             this.closedSubject.next()
             this.closedSubject.complete()
         })

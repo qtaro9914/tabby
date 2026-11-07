@@ -33,6 +33,7 @@ export abstract class BaseSession {
     protected destroyed = new Subject<void>()
     protected loginScriptProcessor: LoginScriptProcessor | null = null
     protected reportedCWD?: string
+    private outputConsumption: Promise<void>[]|null = null
     private initialDataBuffer: Buffer[] = []
     private initialDataBufferLength = 0
     private initialDataBufferTruncated = false
@@ -42,6 +43,7 @@ export abstract class BaseSession {
     get binaryOutput$ (): Observable<Buffer> { return this.binaryOutput }
     get closed$ (): Observable<void> { return this.closed }
     get destroyed$ (): Observable<void> { return this.destroyed }
+    get isDestroyed (): boolean { return this.destroying }
 
     constructor (protected logger: Logger) {
         this.middleware.push(this.oscProcessor)
@@ -78,11 +80,32 @@ export abstract class BaseSession {
     }
 
     feedFromTerminal (data: Buffer): void {
-        this.middleware.feedFromTerminal(data)
+        if (!this.isDestroyed) {
+            this.middleware.feedFromTerminal(data)
+        }
     }
 
-    protected emitOutput (data: Buffer): void {
-        this.middleware.feedFromSession(data)
+    /** Register synchronous middleware output's frontend completion work. */
+    trackOutputConsumption (work: Promise<void>): void {
+        this.outputConsumption?.push(work)
+    }
+
+    /** Resolves after synchronous middleware output's frontend writes finish. */
+    protected emitOutput (data: Buffer): Promise<void> {
+        if (this.isDestroyed) {
+            return Promise.resolve()
+        }
+        const work: Promise<void>[] = []
+        const previous = this.outputConsumption
+        this.outputConsumption = work
+        try {
+            // Middleware can consume an input entirely, buffer a partial UTF-8/OSC
+            // sequence, or split it into many outputs. ACK the input once only.
+            this.middleware.feedFromSession(data)
+        } finally {
+            this.outputConsumption = previous
+        }
+        return Promise.all(work).then(() => undefined)
     }
 
     releaseInitialDataBuffer (): void {
@@ -125,18 +148,26 @@ export abstract class BaseSession {
             return
         }
         this.destroying = true
-        if (this.open) {
+        const wasOpen = this.open
+        this.open = false
+        if (wasOpen) {
             this.logger.info('Destroying')
-            this.open = false
             this.closed.next()
-            this.destroyed.next()
-            await this.gracefullyKillProcess()
         }
-        this.middleware.close()
-        this.closed.complete()
-        this.destroyed.complete()
-        this.output.complete()
-        this.binaryOutput.complete()
+        this.destroyed.next()
+        try {
+            if (wasOpen) {
+                await this.gracefullyKillProcess()
+            }
+        } finally {
+            this.middleware.close()
+            this.initialDataBuffer = []
+            this.initialDataBufferLength = 0
+            this.closed.complete()
+            this.destroyed.complete()
+            this.output.complete()
+            this.binaryOutput.complete()
+        }
     }
 
     abstract start (options: unknown): Promise<void>

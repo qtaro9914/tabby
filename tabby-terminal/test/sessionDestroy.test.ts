@@ -57,4 +57,32 @@ describe('BaseSession.destroy()', () => {
 
         assert.equal(session.killed, 1)
     })
+
+    it('notifies destruction while startup is still pending without reporting a process exit', async () => {
+        const session = new TestSession()
+        session.open = false
+        const events: string[] = []
+        session.closed$.subscribe(() => events.push('closed'))
+        session.destroyed$.subscribe(() => events.push('destroyed'))
+
+        await session.destroy()
+
+        assert.deepEqual(events, ['destroyed'])
+        assert.equal(session.isDestroyed, true)
+        assert.equal(session.killed, 0)
+    })
+
+    it('completes its streams even if process teardown rejects', async () => {
+        const session = new TestSession()
+        session.gracefullyKillProcess = async () => { throw new Error('kill failed') }
+        let outputCompleted = false
+        let destructionCompleted = false
+        session.output$.subscribe({ complete: () => { outputCompleted = true } })
+        session.destroyed$.subscribe({ complete: () => { destructionCompleted = true } })
+
+        await assert.rejects(session.destroy(), /kill failed/)
+
+        assert.equal(outputCompleted, true)
+        assert.equal(destructionCompleted, true)
+    })
 })
