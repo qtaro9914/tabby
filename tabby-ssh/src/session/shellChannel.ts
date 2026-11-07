@@ -15,7 +15,7 @@ interface SSHShellProfile {
 }
 
 interface SSHShellChannelOpener<T> {
-    openShellChannel: (options: SSHShellChannelOptions) => Promise<T>
+    openShellChannel: (options: SSHShellChannelOptions, onChannelReady?: (channel: T) => void) => Promise<T>
 }
 
 export function resolveSSHTerminalType (term: unknown): string {
@@ -25,11 +25,11 @@ export function resolveSSHTerminalType (term: unknown): string {
     return term.trim() || DEFAULT_SSH_TERMINAL_TYPE
 }
 
-export function openShellChannelForProfile<T> (ssh: SSHShellChannelOpener<T>, profile: SSHShellProfile): Promise<T> {
+export function openShellChannelForProfile<T> (ssh: SSHShellChannelOpener<T>, profile: SSHShellProfile, onChannelReady?: (channel: T) => void): Promise<T> {
     return ssh.openShellChannel({
         x11: profile.options.x11,
         term: profile.options.term,
-    })
+    }, onChannelReady)
 }
 
 export function requestShellPTY (channel: Pick<Channel, 'requestPTY'>, options: Pick<SSHShellChannelOptions, 'term'>): Promise<void> {

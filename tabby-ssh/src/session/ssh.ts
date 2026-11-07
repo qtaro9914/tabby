@@ -5,7 +5,7 @@ import stripAnsi from 'strip-ansi'
 import * as shellQuote from 'shell-quote'
 import { marker as _ } from '@biesbjerg/ngx-translate-extract-marker'
 import { Injector } from '@angular/core'
-import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
+import { NgbModal, NgbModalRef } from '@ng-bootstrap/ng-bootstrap'
 import { ConfigService, FileProvidersService, NotificationsService, PromptModalComponent, LogService, Logger, TranslateService, Platform, HostAppService } from 'tabby-core'
 import { Socket } from 'net'
 import { Subject, Observable } from 'rxjs'
@@ -101,7 +101,7 @@ export class KeyboardInteractivePrompt {
 
 export class SSHSession {
     shell?: russh.Channel
-    ssh: russh.SSHClient|russh.AuthenticatedSSHClient
+    ssh?: russh.SSHClient|russh.AuthenticatedSSHClient
     sftp?: russh.SFTP
     forwardedPorts: ForwardedPort[] = []
     jumpChannel: russh.NewChannel|null = null
@@ -135,6 +135,12 @@ export class SSHSession {
     private sftpSessions: Partial<Record<SFTPChannelRole, SFTPSession>> = {}
     private sftpOpening: Partial<Record<SFTPChannelRole, Promise<SFTPSession>>> = {}
     private transferSFTPFallback = false
+    private cancellation = new russh.SshCancellation()
+    private destroying = false
+    private activePrompt: KeyboardInteractivePrompt|null = null
+    private authModals = new Set<NgbModalRef>()
+
+    get isDestroyed (): boolean { return this.destroying }
 
     constructor (
         private injector: Injector,
@@ -435,7 +441,33 @@ export class SSHSession {
     }
 
     async start (): Promise<void> {
+        try {
+            await this.startConnection()
+        } catch (error) {
+            await this.destroy()
+            throw error
+        }
+    }
+
+    private ensureActive (): void {
+        if (this.isDestroyed) {
+            throw new Error('SSH connection cancelled')
+        }
+    }
+
+    private openAuthModal (component: any): NgbModalRef {
+        this.ensureActive()
+        const modal = this.ngbModal.open(component)
+        this.authModals.add(modal)
+        const remove = () => this.authModals.delete(modal)
+        void modal.result.then(remove, remove)
+        return modal
+    }
+
+    private async startConnection (): Promise<void> {
+        this.ensureActive()
         await this.init()
+        this.ensureActive()
 
         const algorithms = {}
         for (const key of Object.values(SSHAlgorithmType)) {
@@ -454,9 +486,9 @@ export class SSHSession {
             if (!argv.every((x): x is string => typeof x === 'string')) {
                 throw new Error('Proxy command contains shell operators, which are not supported')
             }
-            transport = await russh.SshTransport.newCommand(argv[0], argv.slice(1))
+            transport = await russh.SshTransport.newCommand(argv[0], argv.slice(1), this.cancellation)
         } else if (this.jumpChannel) {
-            transport = await russh.SshTransport.newSshChannel(this.jumpChannel.take())
+            transport = await russh.SshTransport.newSshChannel(this.jumpChannel.take(), this.cancellation)
             this.jumpChannel = null
         } else if (this.profile.options.socksProxyHost) {
             this.emitServiceMessage(colors.bgBlue.black(' Proxy ') + ` Using ${this.profile.options.socksProxyHost}:${this.profile.options.socksProxyPort}`)
@@ -465,6 +497,7 @@ export class SSHSession {
                 this.profile.options.socksProxyPort ?? 1080,
                 this.profile.options.host,
                 this.profile.options.port ?? 22,
+                this.cancellation,
             )
         } else if (this.profile.options.httpProxyHost) {
             this.emitServiceMessage(colors.bgBlue.black(' Proxy ') + ` Using ${this.profile.options.httpProxyHost}:${this.profile.options.httpProxyPort}`)
@@ -473,33 +506,50 @@ export class SSHSession {
                 this.profile.options.httpProxyPort ?? 8080,
                 this.profile.options.host,
                 this.profile.options.port ?? 22,
+                this.cancellation,
             )
         } else {
-            transport = await russh.SshTransport.newSocket(`${this.profile.options.host.trim()}:${this.profile.options.port ?? 22}`)
+            transport = await russh.SshTransport.newSocket(`${this.profile.options.host.trim()}:${this.profile.options.port ?? 22}`, this.cancellation)
         }
 
-        this.ssh = await russh.SSHClient.connect(
-            transport,
-            async key => {
-                if (!await this.verifyHostKey(key)) {
-                    return false
-                }
-                this.logger.info('Host key verified')
-                return true
-            },
-            {
-                preferred: {
-                    ciphers: this.profile.options.algorithms[SSHAlgorithmType.CIPHER].filter(x => supportedAlgorithms[SSHAlgorithmType.CIPHER].includes(x)),
-                    kex: this.profile.options.algorithms[SSHAlgorithmType.KEX].filter(x => supportedAlgorithms[SSHAlgorithmType.KEX].includes(x)),
-                    mac: this.profile.options.algorithms[SSHAlgorithmType.HMAC].filter(x => supportedAlgorithms[SSHAlgorithmType.HMAC].includes(x)),
-                    key: this.profile.options.algorithms[SSHAlgorithmType.HOSTKEY].filter(x => supportedAlgorithms[SSHAlgorithmType.HOSTKEY].includes(x)),
-                    compression: this.profile.options.algorithms[SSHAlgorithmType.COMPRESSION].filter(x => supportedAlgorithms[SSHAlgorithmType.COMPRESSION].includes(x)),
+        // eslint-disable-next-line @typescript-eslint/init-declarations
+        let client: russh.SSHClient
+        try {
+            this.ensureActive()
+            client = await russh.SSHClient.connect(
+                transport,
+                async key => {
+                    if (!await this.verifyHostKey(key)) {
+                        return false
+                    }
+                    this.logger.info('Host key verified')
+                    return true
                 },
-                keepaliveIntervalSeconds: this.profile.options.keepaliveInterval ? Math.round(this.profile.options.keepaliveInterval / 1000) : undefined,
-                keepaliveCountMax: this.profile.options.keepaliveCountMax,
-                connectionTimeoutSeconds: this.profile.options.readyTimeout ? Math.round(this.profile.options.readyTimeout / 1000) : undefined,
-            },
-        )
+                {
+                    cancellation: this.cancellation,
+                    preferred: {
+                        ciphers: this.profile.options.algorithms[SSHAlgorithmType.CIPHER].filter(x => supportedAlgorithms[SSHAlgorithmType.CIPHER].includes(x)),
+                        kex: this.profile.options.algorithms[SSHAlgorithmType.KEX].filter(x => supportedAlgorithms[SSHAlgorithmType.KEX].includes(x)),
+                        mac: this.profile.options.algorithms[SSHAlgorithmType.HMAC].filter(x => supportedAlgorithms[SSHAlgorithmType.HMAC].includes(x)),
+                        key: this.profile.options.algorithms[SSHAlgorithmType.HOSTKEY].filter(x => supportedAlgorithms[SSHAlgorithmType.HOSTKEY].includes(x)),
+                        compression: this.profile.options.algorithms[SSHAlgorithmType.COMPRESSION].filter(x => supportedAlgorithms[SSHAlgorithmType.COMPRESSION].includes(x)),
+                    },
+                    keepaliveIntervalSeconds: this.profile.options.keepaliveInterval ? Math.round(this.profile.options.keepaliveInterval / 1000) : undefined,
+                    keepaliveCountMax: this.profile.options.keepaliveCountMax,
+                    connectionTimeoutSeconds: this.profile.options.readyTimeout ? Math.round(this.profile.options.readyTimeout / 1000) : undefined,
+                },
+            )
+        } finally {
+            // connect consumes the transport; also close if cancellation won
+            // between transport creation and handing it to the native client.
+            await transport.close()
+        }
+
+        if (this.isDestroyed) {
+            await client.disconnect()
+            this.ensureActive()
+        }
+        this.ssh = client
 
         this.ssh.banner$.subscribe(banner => {
             if (!this.profile.options.skipBanner) {
@@ -522,7 +572,7 @@ export class SSHSession {
 
         this.authUsername ??= this.profile.options.user
         if (!this.authUsername) {
-            const modal = this.ngbModal.open(PromptModalComponent)
+            const modal = this.openAuthModal(PromptModalComponent)
             modal.componentInstance.prompt = `Username for ${this.profile.options.host}`
             try {
                 const result = await modal.result.catch(() => null)
@@ -542,8 +592,13 @@ export class SSHSession {
         }
 
         await this.populateStoredPasswordsForResolvedUsername()
+        this.ensureActive()
 
         const authenticatedClient = await this.handleAuth()
+        if (this.isDestroyed) {
+            await authenticatedClient?.disconnect()
+            this.ensureActive()
+        }
         if (authenticatedClient) {
             this.ssh = authenticatedClient
         } else {
@@ -682,7 +737,7 @@ export class SSHSession {
 
         const knownHost = this.profile.options.host ? this.knownHosts.getFor(selector) : null
         if (!knownHost || knownHost.digest !== keyDigest) {
-            const modal = this.ngbModal.open(HostKeyPromptModalComponent)
+            const modal = this.openAuthModal(HostKeyPromptModalComponent)
             modal.componentInstance.selector = selector
             modal.componentInstance.digest = keyDigest
             return modal.result.catch(() => false)
@@ -707,6 +762,9 @@ export class SSHSession {
     }
 
     async handleAuth (): Promise<russh.AuthenticatedSSHClient|null> {
+        if (!this.ssh) {
+            throw new Error('SSH client not connected')
+        }
         const subscription = this.ssh.disconnect$.subscribe(() => {
             // Auto auth and >=3 keys found
             if (!this.profile.options.auth && this.allAuthMethods.filter(x => x.type === 'publickey').length >= 3) {
@@ -756,6 +814,7 @@ export class SSHSession {
         }
 
         while (true) {
+            this.ensureActive()
             const method = selectNextAuthMethod(remainingMethods, methodsLeft, sshAuthTypeForMethod)
 
             if (this.previouslyDisconnected || !method) {
@@ -773,7 +832,7 @@ export class SSHSession {
                 updateAuthPlan(result)
             }
             if (method.type === 'prompt-password') {
-                const modal = this.ngbModal.open(PromptModalComponent)
+                const modal = this.openAuthModal(PromptModalComponent)
                 modal.componentInstance.prompt = `Password for ${this.authUsername}@${this.profile.options.host}`
                 modal.componentInstance.password = true
                 modal.componentInstance.showRememberCheckbox = true
@@ -845,13 +904,17 @@ export class SSHSession {
                             }
                         }
 
-                        this.emitKeyboardInteractivePrompt(prompt)
+                        this.ensureActive()
+                        this.activePrompt = prompt
 
                         try {
+                            this.emitKeyboardInteractivePrompt(prompt)
                             // eslint-disable-next-line @typescript-eslint/await-thenable
                             responses = await prompt.promise
                         } catch {
                             break // this loop
+                        } finally {
+                            this.activePrompt = null
                         }
                     }
 
@@ -941,32 +1004,56 @@ export class SSHSession {
     }
 
     async destroy (): Promise<void> {
+        if (this.destroying) {
+            return
+        }
+        this.destroying = true
+        this.cancellation.cancel()
+        this.open = false
         this.logger.info('Destroying')
+        this.activePrompt?.reject()
+        this.activePrompt = null
+        for (const modal of this.authModals) {
+            modal.dismiss('SSH connection closed')
+        }
+        this.authModals.clear()
         this.willDestroy.next()
         this.willDestroy.complete()
         this.serviceMessage.complete()
-        this.ssh.disconnect()
+        this.keyboardInteractivePrompt.complete()
+        await this.ssh?.disconnect().catch(error => this.logger.warn('Could not disconnect SSH', error))
     }
 
-    async openShellChannel (options: SSHShellChannelOptions): Promise<russh.Channel> {
+    async openShellChannel (options: SSHShellChannelOptions, onChannelReady?: (channel: russh.Channel) => void): Promise<russh.Channel> {
         if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {
             throw new Error('Cannot open shell channel before auth')
         }
         const ch = await this.ssh.activateChannel(await this.ssh.openSessionChannel())
-        await requestShellPTY(ch, options)
-        if (options.x11) {
-            await ch.requestX11Forwarding({
-                singleConnection: false,
-                authProtocol: 'MIT-MAGIC-COOKIE-1',
-                authCookie: crypto.randomBytes(16).toString('hex'),
-                screenNumber: 0,
-            })
+        try {
+            this.ensureActive()
+            onChannelReady?.(ch)
+            await requestShellPTY(ch, options)
+            this.ensureActive()
+            if (options.x11) {
+                await ch.requestX11Forwarding({
+                    singleConnection: false,
+                    authProtocol: 'MIT-MAGIC-COOKIE-1',
+                    authCookie: crypto.randomBytes(16).toString('hex'),
+                    screenNumber: 0,
+                })
+                this.ensureActive()
+            }
+            if (this.profile.options.agentForward) {
+                await ch.requestAgentForwarding()
+                this.ensureActive()
+            }
+            await ch.requestShell()
+            this.ensureActive()
+            return ch
+        } catch (error) {
+            await ch.close().catch(() => undefined)
+            throw error
         }
-        if (this.profile.options.agentForward) {
-            await ch.requestAgentForwarding()
-        }
-        await ch.requestShell()
-        return ch
     }
 
     private setupSocketChannelEvents (channel: russh.Channel, socket: Socket, logPrefix: string): void {
@@ -1034,7 +1121,7 @@ export class SSHSession {
                 ].includes(e.toString())) {
                     await this.passwordStorage.deletePrivateKeyPassword(keyHash)
 
-                    const modal = this.ngbModal.open(PromptModalComponent)
+                    const modal = this.openAuthModal(PromptModalComponent)
                     modal.componentInstance.prompt = 'Private key passphrase'
                     modal.componentInstance.password = true
                     modal.componentInstance.showRememberCheckbox = true
@@ -1056,10 +1143,14 @@ export class SSHSession {
     }
 
     ref (): void {
+        this.ensureActive()
         this.refCount++
     }
 
     unref (): void {
+        if (this.refCount === 0) {
+            return
+        }
         this.refCount--
         if (this.refCount === 0) {
             this.destroy()

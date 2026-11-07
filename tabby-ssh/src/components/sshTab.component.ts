@@ -11,6 +11,7 @@ import { SSHPortForwardingModalComponent } from './sshPortForwardingModal.compon
 import { SSHProfile } from '../api'
 import { SSHShellSession } from '../session/shell'
 import { SSHMultiplexerService } from '../services/sshMultiplexer.service'
+import { takeUntil } from 'rxjs'
 
 /** @hidden */
 @Component({
@@ -30,6 +31,7 @@ export class SSHTabComponent extends ConnectableTerminalTabComponent<SSHProfile>
     sftpPath = '/'
     enableToolbar = true
     activeKIPrompt: KeyboardInteractivePrompt|null = null
+    private pendingSSH = new Set<SSHSession>()
 
     constructor (
         injector: Injector,
@@ -75,8 +77,11 @@ export class SSHTabComponent extends ConnectableTerminalTabComponent<SSHProfile>
 
     async setupOneSession (injector: Injector, profile: SSHProfile, multiplex = true): Promise<SSHSession> {
         let session = await this.sshMultiplexer.getSession(profile)
+        this.ensureConnecting()
         if (!multiplex || !session || !profile.options.reuseSession) {
             session = new SSHSession(injector, profile)
+            session.ref()
+            this.pendingSSH.add(session)
 
             if (profile.options.jumpHost) {
                 const jumpConnection = (await this.profilesService.getProfiles()).find(x => x.id === profile.options.jumpHost)
@@ -89,11 +94,12 @@ export class SSHTabComponent extends ConnectableTerminalTabComponent<SSHProfile>
                     this.injector,
                     this.profilesService.getConfigProxyForProfile<SSHProfile>(jumpConnection),
                 )
+                this.ensureConnecting()
 
                 jumpSession.ref()
                 session.willDestroy$.subscribe(() => jumpSession.unref())
-                jumpSession.willDestroy$.subscribe(() => {
-                    if (session?.open) {
+                jumpSession.willDestroy$.pipe(takeUntil(session.willDestroy$)).subscribe(() => {
+                    if (session && !session.isDestroyed) {
                         session.destroy()
                     }
                 })
@@ -146,10 +152,42 @@ export class SSHTabComponent extends ConnectableTerminalTabComponent<SSHProfile>
                 this.stopSpinner()
             }
 
-            this.sshMultiplexer.addSession(session)
+            this.ensureConnecting()
+            await this.sshMultiplexer.addSession(session)
         }
 
+        this.ensureConnecting()
         return session
+    }
+
+    private ensureConnecting (): void {
+        if (this.isConnectionCancelled()) {
+            throw new Error('SSH connection cancelled')
+        }
+    }
+
+    private isConnectionCancelled (): boolean {
+        return this.isDestroyed || this.isDisconnectedByHand
+    }
+
+    private releasePendingSSH (): void {
+        const sessions = [...this.pendingSSH]
+        this.pendingSSH.clear()
+        for (const session of sessions) {
+            session.unref()
+        }
+    }
+
+    async destroy (): Promise<void> {
+        const closing = super.destroy()
+        this.releasePendingSSH()
+        await closing
+    }
+
+    async disconnect (): Promise<void> {
+        const closing = super.disconnect()
+        this.releasePendingSSH()
+        await closing
     }
 
     protected onSessionDestroyed (): void {
@@ -162,19 +200,24 @@ export class SSHTabComponent extends ConnectableTerminalTabComponent<SSHProfile>
     }
 
     private async initializeSessionMaybeMultiplex (multiplex = true): Promise<void> {
-        this.sshSession = await this.setupOneSession(this.injector, this.profile, multiplex)
-        const session = new SSHShellSession(this.injector, this.sshSession, this.profile)
+        try {
+            this.sshSession = await this.setupOneSession(this.injector, this.profile, multiplex)
+            this.ensureConnecting()
+            const session = new SSHShellSession(this.injector, this.sshSession, this.profile)
 
-        this.setSession(session)
-        this.attachSessionHandler(session.serviceMessage$, msg => {
-            msg = msg.replace(/\n/g, '\r\n      ')
-            this.write(`\r${colors.black.bgWhite(' SSH ')} ${msg}\r\n`)
-            session.resize(this.size.columns, this.size.rows)
-        })
+            this.setSession(session)
+            this.attachSessionHandler(session.serviceMessage$, msg => {
+                msg = msg.replace(/\n/g, '\r\n      ')
+                this.write(`\r${colors.black.bgWhite(' SSH ')} ${msg}\r\n`)
+                session.resize(this.size.columns, this.size.rows)
+            })
 
-        await session.start()
+            await session.start()
 
-        this.session?.resize(this.size.columns, this.size.rows)
+            this.session?.resize(this.size.columns, this.size.rows)
+        } finally {
+            this.releasePendingSSH()
+        }
     }
 
     async initializeSession (): Promise<void> {
@@ -182,9 +225,15 @@ export class SSHTabComponent extends ConnectableTerminalTabComponent<SSHProfile>
         try {
             await this.initializeSessionMaybeMultiplex(true)
         } catch {
+            if (this.isConnectionCancelled()) {
+                return
+            }
             try {
                 await this.initializeSessionMaybeMultiplex(false)
             } catch (e) {
+                if (this.isConnectionCancelled()) {
+                    return
+                }
                 console.error('SSH session initialization failed', e)
                 this.write(colors.black.bgRed(' X ') + ' ' + colors.red(e.message) + '\r\n')
                 return

@@ -13,6 +13,9 @@ export class SSHMultiplexerService {
 
     async addSession (session: SSHSession): Promise<void> {
         const key = await this.getMultiplexerKey(session.profile)
+        if (session.isDestroyed) {
+            return
+        }
         this.sessions.set(key, session)
         session.willDestroy$.subscribe(() => {
             if (this.sessions.get(key) === session) {
@@ -24,7 +27,8 @@ export class SSHMultiplexerService {
     async getSession (profile: PartialProfile<SSHProfile>): Promise<SSHSession|null> {
         const fullProfile = this.profilesService.getConfigProxyForProfile(profile)
         const key = await this.getMultiplexerKey(fullProfile)
-        return this.sessions.get(key) ?? null
+        const session = this.sessions.get(key)
+        return session && !session.isDestroyed ? session : null
     }
 
     private async getMultiplexerKey (profile: SSHProfile) {
