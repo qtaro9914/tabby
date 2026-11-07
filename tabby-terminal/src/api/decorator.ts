@@ -30,6 +30,10 @@ export abstract class TerminalDecorator {
         if (!subscription) {
             return
         }
+        if (terminal.isDestroyed || subscription.closed) {
+            subscription.unsubscribe()
+            return
+        }
         if (!this.smartSubscriptions.has(terminal)) {
             this.smartSubscriptions.set(terminal, [])
         }

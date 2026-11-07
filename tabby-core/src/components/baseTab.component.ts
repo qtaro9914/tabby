@@ -268,11 +268,13 @@ export abstract class BaseTabComponent extends BaseComponent {
             return
         }
         this._destroyCalled = true
+        this._isDestroyed = true
         this.focused.complete()
         this.blurred.complete()
         this.titleChange.complete()
         this.progress.complete()
         this.activity.complete()
+        this.visibility.complete()
         this.recoveryStateChangedHint.complete()
         if (!skipDestroyedEvent) {
             this.destroyed.next()

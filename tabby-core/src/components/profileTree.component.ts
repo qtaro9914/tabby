@@ -51,9 +51,12 @@ export class ProfileTreeComponent extends BaseComponent {
 
     async ngOnInit (): Promise<void> {
         await this.loadTreeItems()
+        if (this.isDestroyed) {
+            return
+        }
         this.subscribeUntilDestroyed(this.config.changed$, () => this.loadTreeItems())
-        this.app.tabsChanged$.subscribe(() => this.tabStateChanged())
-        this.app.activeTabChange$.subscribe(() => this.tabStateChanged())
+        this.subscribeUntilDestroyed(this.app.tabsChanged$, () => this.tabStateChanged())
+        this.subscribeUntilDestroyed(this.app.activeTabChange$, () => this.tabStateChanged())
     }
 
 

@@ -44,6 +44,7 @@ export class Window {
     private touchBarControl: any
     private isFluentVibrancy = false
     private dockHidden = false
+    private listenerCleanup: (() => void)[] = []
 
     get visible$ (): Observable<boolean> { return this.visible }
     get closed$ (): Observable<void> { return this.closed }
@@ -176,6 +177,10 @@ export class Window {
                 }
             }
             ipcMain.on('app:ready', listener)
+            this.listenerCleanup.push(() => {
+                ipcMain.removeListener('app:ready', listener)
+                resolve()
+            })
         })
     }
 
@@ -519,31 +524,38 @@ export class Window {
     }
 
     on (event: string, listener: (...args: any[]) => void): void {
-        ipcMain.on(event, (e, ...args) => {
+        const wrapped = (e, ...args) => {
             if (!this.window || e.sender !== this.window.webContents) {
                 return
             }
             listener(e, ...args)
-        })
+        }
+        ipcMain.on(event, wrapped)
+        this.listenerCleanup.push(() => ipcMain.removeListener(event, wrapped))
+    }
+
+    private onUpdater (event: Parameters<typeof autoUpdater.on>[0], listener: (...args: any[]) => void): void {
+        autoUpdater.on(event, listener)
+        this.listenerCleanup.push(() => autoUpdater.removeListener(event, listener))
     }
 
     private setupUpdater () {
         autoUpdater.autoDownload = true
         autoUpdater.autoInstallOnAppQuit = true
 
-        autoUpdater.on('update-available', () => {
+        this.onUpdater('update-available', () => {
             this.send('updater:update-available')
         })
 
-        autoUpdater.on('update-not-available', () => {
+        this.onUpdater('update-not-available', () => {
             this.send('updater:update-not-available')
         })
 
-        autoUpdater.on('error', err => {
+        this.onUpdater('error', err => {
             this.send('updater:error', err)
         })
 
-        autoUpdater.on('update-downloaded', () => {
+        this.onUpdater('update-downloaded', () => {
             this.send('updater:update-downloaded')
         })
 
@@ -557,6 +569,10 @@ export class Window {
     }
 
     private destroy () {
+        for (const cleanup of this.listenerCleanup) {
+            cleanup()
+        }
+        this.listenerCleanup = []
         this.window = undefined
         this.closed.next()
         this.visible.complete()

@@ -85,6 +85,7 @@ export class SettingsTabComponent extends BaseTabComponent {
     }
 
     ngOnDestroy () {
+        super.ngOnDestroy()
         this.config.save()
     }
 

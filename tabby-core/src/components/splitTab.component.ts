@@ -1,10 +1,11 @@
-import { Observable, Subject, takeWhile } from 'rxjs'
+import { Observable, Subject } from 'rxjs'
 import { Component, Injectable, ViewChild, ViewContainerRef, EmbeddedViewRef, AfterViewInit, NgZone, OnDestroy, Injector } from '@angular/core'
 import { BaseTabComponent, BaseTabProcess, GetRecoveryTokenOptions } from './baseTab.component'
 import { TabRecoveryProvider, RecoveryToken } from '../api/tabRecovery'
 import { TabsService, NewTabParameters } from '../services/tabs.service'
 import { HotkeysService } from '../services/hotkeys.service'
 import { TabRecoveryService } from '../services/tabRecovery.service'
+import { SubscriptionContainer } from './base.component'
 
 export type SplitOrientation = 'v' | 'h'
 export type SplitDirection = 'r' | 't' | 'b' | 'l'
@@ -231,6 +232,7 @@ export class SplitTabComponent extends BaseTabComponent implements AfterViewInit
     private focusedTab: BaseTabComponent|null = null
     private maximizedTab: BaseTabComponent|null = null
     private viewRefs: Map<BaseTabComponent, EmbeddedViewRef<any>> = new Map()
+    private childSubscriptions = new Map<BaseTabComponent, SubscriptionContainer>()
     private paneGeometries = new Map<BaseTabComponent, SplitPaneGeometry>()
 
     private tabAdded = new Subject<BaseTabComponent>()
@@ -403,6 +405,14 @@ export class SplitTabComponent extends BaseTabComponent implements AfterViewInit
     ngOnDestroy (): void {
         this.tabAdded.complete()
         this.tabRemoved.complete()
+        this.tabAdopted.complete()
+        this.splitAdjusted.complete()
+        this.focusChanged.complete()
+        this.initialized.complete()
+        for (const subscriptions of this.childSubscriptions.values()) {
+            subscriptions.cancelAll()
+        }
+        this.childSubscriptions.clear()
         super.ngOnDestroy()
     }
 
@@ -552,7 +562,14 @@ export class SplitTabComponent extends BaseTabComponent implements AfterViewInit
 
         tab.removeFromContainer()
         tab.parent = null
+        this.detachTabView(tab)
         this.viewRefs.delete(tab)
+        if (this.focusedTab === tab) {
+            this.focusedTab = null
+        }
+        if (this.maximizedTab === tab) {
+            this.maximizedTab = null
+        }
 
         this.layout()
 
@@ -560,7 +577,7 @@ export class SplitTabComponent extends BaseTabComponent implements AfterViewInit
         if (this.root.children.length === 0) {
             this.destroy()
         } else {
-            this.focusAnyIn(parent)
+            this.focusAnyIn(parent.children.length ? parent : this.root)
         }
     }
 
@@ -572,6 +589,8 @@ export class SplitTabComponent extends BaseTabComponent implements AfterViewInit
         const position = parent.children.indexOf(tab)
         parent.children[position] = newTab
         tab.removeFromContainer()
+        this.detachTabView(tab)
+        this.viewRefs.delete(tab)
         this.attachTabView(newTab)
         tab.parent = null
         newTab.parent = this
@@ -846,16 +865,19 @@ export class SplitTabComponent extends BaseTabComponent implements AfterViewInit
     }
 
     private attachTabView (tab: BaseTabComponent) {
+        this.detachTabView(tab)
+        const subscriptions = new SubscriptionContainer()
+        this.childSubscriptions.set(tab, subscriptions)
         const ref = tab.insertIntoContainer(this.viewContainer)
         this.viewRefs.set(tab, ref)
-        tab.addEventListenerUntilDestroyed(ref.rootNodes[0], 'click', () => this.focus(tab))
+        subscriptions.addEventListener(ref.rootNodes[0], 'click', () => this.focus(tab))
         if (this.config.store.terminal.focusFollowsMouse) {
             // Register outside the zone — mousemove fires constantly and a
             // zone-patched listener would trigger change detection on every
             // event even when the handler does nothing. Re-enter the zone
             // only when the focus actually changes.
             this.zone.runOutsideAngular(() => {
-                tab.addEventListenerUntilDestroyed(ref.rootNodes[0], 'mousemove', () => {
+                subscriptions.addEventListener(ref.rootNodes[0], 'mousemove', () => {
                     if (this._spannerResizing || this.focusedTab === tab && tab.hasFocus) {
                         return
                     }
@@ -864,40 +886,39 @@ export class SplitTabComponent extends BaseTabComponent implements AfterViewInit
             })
         }
 
-        tab.subscribeUntilDestroyed(
-            this.observeUntilChildDetached(tab, tab.focused$),
+        subscriptions.subscribe(
+            tab.focused$,
             () => this.updateTitle(),
         )
-        tab.subscribeUntilDestroyed(
-            this.observeUntilChildDetached(tab, tab.titleChange$),
+        subscriptions.subscribe(
+            tab.titleChange$,
             () => this.updateTitle(),
         )
-        tab.subscribeUntilDestroyed(
-            this.observeUntilChildDetached(tab, tab.activity$),
+        subscriptions.subscribe(
+            tab.activity$,
             a => a ? this.displayActivity() : this.clearActivity(),
         )
-        tab.subscribeUntilDestroyed(
-            this.observeUntilChildDetached(tab, tab.progress$),
+        subscriptions.subscribe(
+            tab.progress$,
             p => this.setProgress(p),
         )
         if (tab.title) {
             this.updateTitle()
         }
-        tab.subscribeUntilDestroyed(
-            this.observeUntilChildDetached(tab, tab.recoveryStateChangedHint$),
+        subscriptions.subscribe(
+            tab.recoveryStateChangedHint$,
             () => {
                 this.recoveryStateChangedHint.next()
             },
         )
-        tab.destroyed$.subscribe(() => {
+        subscriptions.subscribe(tab.destroyed$, () => {
             this.removeTab(tab)
         })
     }
 
-    private observeUntilChildDetached<T> (tab: BaseTabComponent, event: Observable<T>): Observable<T> {
-        return event.pipe(takeWhile(() => {
-            return this.getAllTabs().includes(tab)
-        }))
+    private detachTabView (tab: BaseTabComponent): void {
+        this.childSubscriptions.get(tab)?.cancelAll()
+        this.childSubscriptions.delete(tab)
     }
 
     private onAfterTabAdded (tab: BaseTabComponent) {

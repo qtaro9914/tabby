@@ -42,19 +42,33 @@ export class SubscriptionContainer {
 }
 
 export class BaseComponent {
+    protected _isDestroyed = false
+    private teardownCalled = false
+    get isDestroyed (): boolean { return this._isDestroyed }
     protected get destroyed$ (): Observable<void> { return this._destroyed }
     private _destroyed = new Subject<void>()
     private _subscriptionContainer = new SubscriptionContainer()
 
     addEventListenerUntilDestroyed (element: HTMLElement, event: string, handler: EventListenerOrEventListenerObject, options?: boolean|AddEventListenerOptions): void {
+        if (this.isDestroyed) {
+            return
+        }
         this._subscriptionContainer.addEventListener(element, event, handler, options)
     }
 
     subscribeUntilDestroyed <T> (observable: Observable<T>, handler: (v: T) => void): void {
+        if (this.isDestroyed) {
+            return
+        }
         this._subscriptionContainer.subscribe(observable, handler)
     }
 
     ngOnDestroy (): void {
+        if (this.teardownCalled) {
+            return
+        }
+        this.teardownCalled = true
+        this._isDestroyed = true
         this._destroyed.next()
         this._destroyed.complete()
         this._subscriptionContainer.cancelAll()

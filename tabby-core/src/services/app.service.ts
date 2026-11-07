@@ -22,6 +22,8 @@ class CompletionObserver {
     private done = new AsyncSubject<void>()
     private destroyed = new AsyncSubject<void>()
     private interval: number
+    private stopped = false
+    private ticking = false
 
     constructor (private tab: BaseTabComponent) {
         this.interval = setInterval(() => this.tick(), 1000) as any
@@ -29,13 +31,31 @@ class CompletionObserver {
     }
 
     async tick () {
-        if (!await this.tab.getCurrentProcess()) {
+        if (this.stopped || this.ticking) {
+            return
+        }
+        this.ticking = true
+        try {
+            if (!await this.tab.getCurrentProcess()) {
+                this.completeIfActive()
+            }
+        } finally {
+            this.ticking = false
+        }
+    }
+
+    private completeIfActive (): void {
+        if (!this.stopped) {
             this.done.next()
             this.stop()
         }
     }
 
     stop () {
+        if (this.stopped) {
+            return
+        }
+        this.stopped = true
         clearInterval(this.interval)
         this.destroyed.next()
         this.destroyed.complete()
@@ -601,7 +621,9 @@ export class AppService {
         if (!this.completionObservers.has(tab)) {
             const observer = new CompletionObserver(tab)
             observer.destroyed$.subscribe(() => {
-                this.stopObservingTabCompletion(tab)
+                if (this.completionObservers.get(tab) === observer) {
+                    this.completionObservers.delete(tab)
+                }
             })
             this.completionObservers.set(tab, observer)
         }
@@ -609,7 +631,9 @@ export class AppService {
     }
 
     stopObservingTabCompletion (tab: BaseTabComponent): void {
+        const observer = this.completionObservers.get(tab)
         this.completionObservers.delete(tab)
+        observer?.stop()
     }
 
     // Deprecated
