@@ -80,6 +80,7 @@ export class HotkeysService {
     private lastEventTimestamp = 0
     private lastWheelTimestamp: number|null = null
     private cachedHotkeysConfig: Record<string, any>|null = null
+    private maxKeystrokeHistory = 1
 
     private constructor (
         private zone: NgZone,
@@ -123,6 +124,7 @@ export class HotkeysService {
 
         this.config.changed$.subscribe(() => {
             this.cachedHotkeysConfig = null
+            this.lastKeystrokes = []
         })
 
         // deprecated
@@ -195,10 +197,7 @@ export class HotkeysService {
             const keystroke = getKeystrokeName([...this.pressedKeys])
             if (!shouldSuppressKeystroke && keystroke && this.recognitionPhase) {
                 this._keystroke.next(keystroke)
-                this.lastKeystrokes.push({
-                    keystroke,
-                    time: performance.now(),
-                })
+                this.recordKeystroke(keystroke)
                 this.recognitionPhase = false
             }
             this.pressedKeys.clear()
@@ -210,10 +209,7 @@ export class HotkeysService {
             this.addPressedKey(keyName, eventData)
             const keystroke = getKeystrokeName([...this.pressedKeys])
             this._keystroke.next(keystroke)
-            this.lastKeystrokes.push({
-                keystroke,
-                time: performance.now(),
-            })
+            this.recordKeystroke(keystroke)
             this.pressedKeystroke = keystroke
             this.recognitionPhase = true
             this.suppressNextKeyupKeystroke = true
@@ -391,8 +387,24 @@ export class HotkeysService {
     private getHotkeysConfig () {
         // Rebuilding the flattened hotkey map is too expensive to do on every
         // key event — cache it until the config changes
-        this.cachedHotkeysConfig ??= this.getHotkeysConfigRecursive(this.config.store.hotkeys)
+        if (!this.cachedHotkeysConfig) {
+            this.cachedHotkeysConfig = this.getHotkeysConfigRecursive(this.config.store.hotkeys)
+            this.maxKeystrokeHistory = 1
+            for (const sequences of Object.values(this.cachedHotkeysConfig)) {
+                for (const sequence of sequences) {
+                    this.maxKeystrokeHistory = Math.max(this.maxKeystrokeHistory, sequence.length)
+                }
+            }
+        }
         return this.cachedHotkeysConfig
+    }
+
+    private recordKeystroke (keystroke: Keystroke): void {
+        this.getHotkeysConfig()
+        this.lastKeystrokes.push({ keystroke, time: performance.now() })
+        // Wheel/mouse strokes are also the current stroke while matching, so
+        // retain a full sequence rather than sequence.length - 1 entries.
+        this.lastKeystrokes = this.lastKeystrokes.slice(-this.maxKeystrokeHistory)
     }
 
     private getHotkeysConfigRecursive (branch: any) {
