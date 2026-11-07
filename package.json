@@ -101,6 +101,7 @@
     "test:unit": "node --import ./scripts/test-register.mjs --test \"tabby-{terminal,electron}/test/*.test.ts\"",
     "lint": "eslint --ext ts */src */lib",
     "test:transfers": "node --experimental-transform-types --test tabby-core/test/*.test.ts",
+    "test:memory": "node scripts/audit-memory-leaks.cjs",
     "postinstall": "patch-package && node ./scripts/install-deps.mjs && node ./scripts/build-native.mjs",
     "i18n:pull": "crowdin pull --skip-untranslated-strings",
     "i18n:extract": "node scripts/i18n-extract.mjs",

@@ -185,3 +185,38 @@ hour and up/down step counts. Flags metrics that moved >10% end to end with
   tab body is never rendered and the terminal session never starts.
 - PTY flow control can be tuned per launch via `TABBY_FLOW_MAX_DELTA` /
   `TABBY_FLOW_MAX_CHUNK` (bytes; see `app/lib/pty.ts`).
+
+
+## Local russh / terminal lifecycle integration
+
+This check launches a separate Electron instance with its own config and user-data
+under `.native-work/integration`. It uses a loopback-only Python Paramiko SSH
+fixture, not an external SSH account. Currently targets Linux with `/bin/bash --noprofile --norc` and history disabled.
+Requires Python 3 with Paramiko, a desktop
+display, a free CDP port 49322, and Node 21+ for the harness. The declared
+russh dependency must already be installed. It now points to the published
+`qtaro9914/russh-napi` release `v0.1.38-rw.2`.
+
+```bash
+TABBY_DEV=1 yarn run build
+node scripts/perf/ssh-memory-integration.mjs
+```
+
+For testing an unpublished fork, first run
+`node scripts/use-local-russh.mjs /path/to/built/russh-napi`. The override changes
+only ignored `app/node_modules/russh` build outputs and saves the current release
+installation in `.native-work/russh-release-backup`. It does not change the release
+URL or lockfile. `node scripts/use-local-russh.mjs --restore` restores that saved
+installation. A dependency reinstall may also remove the override. The obsolete
+rw.1 backup from the initial integration is archived separately under
+`.native-work/release-rw2/russh-original-rw1-backup`.
+
+The harness checks real xterm parser callbacks against native SSH and PTY receive
+credit, pauses/resumes 8MiB output, verifies content hashes and split UTF-8, closes
+a paused terminal, closes ten pending connections, remotely closes twenty channels on one shared
+connection without retaining their receive state, cancels authentication and
+host-key waits, and checks final output before EOF/process teardown. It fails on
+unhandled renderer errors and saves JSON evidence and screenshots under
+`.native-work/integration`. This is a short integration check, not a long-running
+leak test. SSH credit currently pauses all packet dispatch on the shared
+connection; independent per-channel SSH flow control is not implemented.

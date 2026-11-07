@@ -18,6 +18,7 @@ dist
 
 coverage
 .nyc_output
+.native-work/
 npm-debug.log
 
 builtin-plugins
