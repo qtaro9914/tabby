@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { clampWheelReports, repeatWheelReports, scrollToBottomIfNeeded } from '../src/frontends/scrolling.ts'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { clampWheelReports, coalesceScrollbarHide, repeatWheelReports, scrollToBottomIfNeeded } from '../src/frontends/scrolling.ts'
 
 const WHEEL = 4
 const LEFT = 0
@@ -136,5 +138,84 @@ describe('scrollToBottomIfNeeded', () => {
         core.buffer = { ydisp: 10, ybase: 20 }
         scroll()
         assert.equal(calls, 1)
+    })
+})
+
+// Mirrors xterm's TimeoutTimer (_token is -1 while idle) on a manual clock
+function fakeScrollable () {
+    let clock = 0
+    const timers: Array<{ at: number, fn: () => void }> = []
+    const timer = {
+        _token: -1 as number,
+        armed: 0,
+        cancelAndSet (fn: () => void, ms: number): void {
+            timers.length = 0
+            this.armed++
+            this._token = 1
+            timers.push({ at: clock + ms, fn: () => { this._token = -1; fn() } })
+        },
+    }
+    const element = {
+        _hideTimeout: timer,
+        _mouseIsOver: false,
+        _isDragging: false,
+        hidden: 0,
+        _hide (): void { this.hidden++ },
+        _scheduleHide (): void { throw new Error('original should be replaced') },
+    }
+    const advance = (ms: number): void => {
+        // step 1ms at a time so timers see their own due time
+        for (let i = 0; i < ms; i++) {
+            clock++
+            while (timers.length && timers[0].at <= clock) { timers.shift()!.fn() }
+        }
+    }
+    return { element, timer, advance, now: () => clock }
+}
+
+describe('coalesceScrollbarHide', () => {
+    it('arms one timer for a burst of scrolls and hides 500ms after the last one', () => {
+        const { element, timer, advance, now } = fakeScrollable()
+        assert.equal(coalesceScrollbarHide(element, now), true)
+        for (let i = 0; i < 100; i++) {
+            element._scheduleHide()
+            advance(10)
+        }
+        // 100 scrolls over 1s: the timer re-armed itself twice, not 100 times
+        assert.ok(timer.armed <= 3, `armed ${timer.armed} times`)
+        assert.equal(element.hidden, 0)
+        advance(489)
+        assert.equal(element.hidden, 0)
+        advance(20)
+        assert.equal(element.hidden, 1)
+    })
+
+    it('does not schedule a hide while hovered or dragged', () => {
+        const { element, timer, advance, now } = fakeScrollable()
+        coalesceScrollbarHide(element, now)
+        element._mouseIsOver = true
+        element._scheduleHide()
+        element._mouseIsOver = false
+        element._isDragging = true
+        element._scheduleHide()
+        advance(1000)
+        assert.equal(timer.armed, 0)
+        assert.equal(element.hidden, 0)
+    })
+
+    it('leaves unknown shapes alone', () => {
+        assert.equal(coalesceScrollbarHide(undefined), false)
+        const { element } = fakeScrollable()
+        const original = element._scheduleHide
+        assert.equal(coalesceScrollbarHide({ ...element, _hideTimeout: undefined }), false)
+        assert.equal(element._scheduleHide, original)
+    })
+
+    it('reaches internals that the installed @xterm/xterm still has', () => {
+        const require = createRequire(import.meta.url)
+        const source = readFileSync(require.resolve('@xterm/xterm'), 'utf8')
+        for (const name of ['_scrollableElement=', '_hideTimeout=', '_scheduleHide()', '_token=-1', '_mouseIsOver=', '_isDragging=']) {
+            assert.ok(source.includes(name), `xterm no longer has ${name}`)
+        }
     })
 })

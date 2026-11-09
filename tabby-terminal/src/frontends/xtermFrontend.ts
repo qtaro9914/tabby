@@ -20,7 +20,7 @@ import { getXtermBackgroundColor } from '../helpers'
 import { generatePalette } from '../generatePalette'
 import { disposeWebglAddon } from './webglAddon'
 import { handleAltArrowWordJump } from './altArrowKeys'
-import { repeatWheelReports, scrollToBottomIfNeeded } from './scrolling'
+import { coalesceScrollbarHide, repeatWheelReports, scrollToBottomIfNeeded } from './scrolling'
 import { WebGLRendererRecovery } from './rendererRecovery'
 import { TerminalWriteCompletion } from './writeCompletion'
 import './xterm.css'
@@ -366,6 +366,7 @@ export class XTermFrontend extends Frontend {
 
         this.xterm.open(host)
         this.opened = true
+        coalesceScrollbarHide(this.xtermCore._viewport?._scrollableElement)
 
         // Work around font loading bugs
         await new Promise(resolve => setTimeout(resolve, this.hostApp.platform === Platform.Web ? 1000 : 0))

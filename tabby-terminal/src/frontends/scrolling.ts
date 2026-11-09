@@ -79,3 +79,59 @@ export function scrollToBottomIfNeeded (core: ScrollableCoreLike, scrollToBottom
         }
     }
 }
+
+const SCROLLBAR_HIDE_DELAY = 500
+
+interface HideTimerLike {
+    _token: unknown
+    cancelAndSet: (runner: () => void, timeout: number) => void
+}
+
+interface ScrollableElementLike {
+    _hideTimeout?: HideTimerLike
+    _mouseIsOver: boolean
+    _isDragging: boolean
+    _hide: () => void
+    _scheduleHide: () => void
+}
+
+/**
+ * xterm 6's scrollable element reveals the scrollbar on every scroll and
+ * re-arms its 500ms hide timer each time with clearTimeout + setTimeout, both
+ * through Zone.js. Output scrolls once per line, so a fast `cat` spent ~16% of
+ * the renderer there. Keep one timer armed instead and push its deadline back:
+ * it fires at most every 500ms and re-arms itself for the time left. The
+ * scrollbar still hides 500ms after the last scroll.
+ *
+ * Returns false (and changes nothing) if xterm's internals no longer match.
+ */
+export function coalesceScrollbarHide (element: ScrollableElementLike|undefined, now: () => number = () => performance.now()): boolean {
+    const timer = element?._hideTimeout
+    if (
+        !element || !timer ||
+        typeof timer._token !== 'number' || typeof timer.cancelAndSet !== 'function' ||
+        typeof element._hide !== 'function' || typeof element._scheduleHide !== 'function'
+    ) {
+        return false
+    }
+    let hideAt = 0
+    const fire = () => {
+        const rest = hideAt - now()
+        if (rest > 1) {
+            timer.cancelAndSet(fire, rest)
+        } else {
+            element._hide()
+        }
+    }
+    element._scheduleHide = () => {
+        if (element._mouseIsOver || element._isDragging) {
+            return
+        }
+        hideAt = now() + SCROLLBAR_HIDE_DELAY
+        // TimeoutTimer keeps -1 while nothing is armed
+        if (timer._token === -1) {
+            timer.cancelAndSet(fire, SCROLLBAR_HIDE_DELAY)
+        }
+    }
+    return true
+}
