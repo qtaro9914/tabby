@@ -8,6 +8,7 @@ import { AppService, ConfigService, BaseTabComponent, HostAppService, HotkeysSer
 import { BaseSession } from '../session'
 
 import { Frontend } from '../frontends/frontend'
+import { WriteCoalescer } from '../frontends/writeCoalescer'
 import { XTermFrontend, XTermWebGLFrontend } from '../frontends/xtermFrontend'
 import { shouldUseWebGL } from '../frontends/webglSupport'
 import { ResizeEvent, BaseTerminalProfile } from './interfaces'
@@ -161,7 +162,15 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         this.revealToolbar = false
     }, 1000)
 
-    private frontendWriteLock = Promise.resolve()
+    private frontendWrites = new WriteCoalescer(async data => {
+        if (!this.isDestroyed) {
+            await this.withSpinnerPaused(() => this.writeRaw(data))
+        }
+    }, error => {
+        if (!this.isDestroyed) {
+            this.logger.warn('Terminal frontend write failed', error)
+        }
+    })
 
     get input$ (): Observable<Buffer> {
         if (!this.frontend) {
@@ -533,18 +542,8 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         if (this.isDestroyed) {
             return
         }
-        const write = this.frontendWriteLock.then(async () => {
-            if (!this.isDestroyed) {
-                await this.withSpinnerPaused(() => this.writeRaw(data))
-            }
-        })
-        this.frontendWriteLock = write.catch(e => {
-            if (!this.isDestroyed) {
-                this.logger.warn('Terminal frontend write failed', e)
-            }
-        })
         try {
-            await write
+            await this.frontendWrites.write(data)
         } catch (error) {
             // Other frontend implementations may reject during disposal.
             // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
